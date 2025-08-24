@@ -1,9 +1,14 @@
 {
   "name": "koishi-plugin-steam-workshop-downloader",
   "description": "A plugin downloads workshop's file via steamcmd.",
-  "version": "0.0.1",
+  "version": "0.0.5",
   "main": "lib/index.js",
   "typings": "lib/index.d.ts",
+  "homepage": "https://github.com/Apricityx/koishi-plugin-steam-workshop-downloader",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Apricityx/koishi-plugin-steam-workshop-downloader.git"
+  },
   "files": [
     "lib",
     "dist"
@@ -15,6 +20,7 @@
     "plugin"
   ],
   "peerDependencies": {
-    "koishi": "^4.18.7"
+    "koishi": "^4.18.7",
+    "mime-types": "^3.0.1"
   }
 }

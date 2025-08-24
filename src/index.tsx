@@ -1,14 +1,41 @@
 /* @jsx h */
 import { Context, Schema, h } from 'koishi'
-import { exec } from 'child_process'
+import { spawn } from 'child_process'
 import path from 'path'
 import fs from 'fs/promises'
 import { basename } from 'path'
-import { lookup as mimeLookup } from 'mime-types'  // npm i mime-types
+import { lookup as mimeLookup } from 'mime-types'
 
 export const name = 'steam-workshop-downloader'
-export interface Config {}
-export const Config: Schema<Config> = Schema.object({})
+
+export interface Config {
+  debug: boolean
+  enable_proxy: boolean
+  proxy_address: string      // 例如: http://127.0.0.1:7897 或 socks5://127.0.0.1:1080
+  appid: string              // 目标游戏的 AppID
+}
+
+export const Config: Schema<Config> = Schema.intersect([
+  Schema.object({
+    debug: Schema.boolean().description('是否启动调试模式').default(false),
+  }).description('基础配置'),
+
+  Schema.object({
+    enable_proxy: Schema.boolean().description('是否启用代理').default(false),
+  }).description('代理设置'),
+
+  Schema.union([
+    Schema.object({
+      enable_proxy: Schema.const(true).required(),
+      proxy_address: Schema.string().description('代理地址').default('http://127.0.0.1:7897'),
+    }),
+    Schema.object({}) as any,
+  ]) as any,
+
+  Schema.object({
+    appid: Schema.string().description('目标游戏的 AppID（必填）').required(),
+  }),
+]) as any
 
 // ================= 工具函数 =================
 async function sendAnyFile(session: any, absPath: string) {
@@ -23,7 +50,6 @@ async function ensureDir(dir: string) {
   await fs.mkdir(dir, { recursive: true }).catch(() => void 0)
 }
 
-/** 递归找到目录下“第一个”文件（非目录） */
 async function findFirstFile(dir: string): Promise<string | null> {
   let entries: any[]
   try {
@@ -37,103 +63,151 @@ async function findFirstFile(dir: string): Promise<string | null> {
       const sub = await findFirstFile(p)
       if (sub) return sub
     } else {
-      return p // 只取第一个文件
+      return p
     }
   }
   return null
 }
 
-/** 将 exec 封装为 Promise */
-function execAsync(command: string): Promise<{ stdout: string; stderr: string }> {
+/**
+ * 强诊断版：执行一条 shell 命令，实时输出日志，并在失败时打印所有细节
+ * - command 会通过 /bin/sh -lc "command" 执行（兼容你的 +force_install_dir 等参数写法）
+ * - extraEnv 会注入到子进程环境
+ */
+function runCommand(
+  logger: Context['logger'],
+  command: string,
+  opts?: {
+    cwd?: string
+    extraEnv?: Record<string, string>
+    printEnvKeys?: string[]   // 失败时额外打印的 env 变量名（比如代理）
+    debug?: boolean
+  }
+): Promise<{ stdout: string; stderr: string; exitCode: number | null; signal: NodeJS.Signals | null }> {
+  const cwd = opts?.cwd || process.cwd()
+  const env = { ...process.env, ...(opts?.extraEnv || {}) }
+
+  // 实时输出 & 截断缓存（只保留最后 4KB，防止超大日志）
+  let outBuf = ''
+  let errBuf = ''
+  const append = (buf: string, chunk: string) => {
+    buf += chunk
+    // 只保留最后 4096 字节
+    if (buf.length > 4096) buf = buf.slice(buf.length - 4096)
+    return buf
+  }
+
+  if (opts?.debug) {
+    logger.info(`[run] cwd=${cwd}`)
+    logger.info(`[run] command=/bin/sh -lc ${JSON.stringify(command)}`)
+    if (opts?.printEnvKeys?.length) {
+      const kv: Record<string, string | undefined> = {}
+      for (const k of opts.printEnvKeys) kv[k] = env[k]
+      logger.info(`[run] selected env: ${JSON.stringify(kv, null, 2)}`)
+    }
+  }
+
   return new Promise((resolve, reject) => {
-    exec(command, (error, stdout, stderr) => {
-      if (error) return reject(Object.assign(error, { stdout, stderr }))
-      resolve({ stdout, stderr })
+    const child = spawn('/bin/sh', ['-lc', command], {
+      cwd,
+      env,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    })
+
+    child.stdout.setEncoding('utf8')
+    child.stderr.setEncoding('utf8')
+
+    child.stdout.on('data', (chunk: string) => {
+      outBuf = append(outBuf, chunk)
+      logger.info(`[stdout] ${chunk.trimEnd()}`)
+    })
+    child.stderr.on('data', (chunk: string) => {
+      errBuf = append(errBuf, chunk)
+      // 用 warn 显示 stderr，但保留原始内容
+      logger.warn(`[stderr] ${chunk.trimEnd()}`)
+    })
+
+    child.on('error', (err: any) => {
+      // 进程启动阶段的错误（可执行文件不存在 / 权限等）
+      const diag = {
+        where: 'spawn.error',
+        message: err?.message,
+        code: err?.code,
+        errno: err?.errno,
+        syscall: err?.syscall,
+        path: err?.path,
+        spawnargs: err?.spawnargs,
+        command,
+        cwd,
+        // 打印关键信息：代理环境变量
+        env_pick: pickEnv(env, ['http_proxy', 'https_proxy', 'all_proxy', 'HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY']),
+        stdout_tail_4kb: outBuf,
+        stderr_tail_4kb: errBuf,
+        stack: (err?.stack || '').split('\n').slice(0, 12).join('\n'),
+      }
+      logger.error(`[run] child error:\n${JSON.stringify(diag, null, 2)}`)
+      reject(Object.assign(new Error('spawn error'), { cause: diag }))
+    })
+
+    child.on('close', (code: number | null, signal: NodeJS.Signals | null) => {
+      if (code === 0) {
+        if (opts?.debug) {
+          logger.info(`[run] exit code 0, signal=${signal ?? 'null'}`)
+        }
+        resolve({ stdout: outBuf, stderr: errBuf, exitCode: code, signal })
+      } else {
+        const diag = {
+          where: 'close',
+          exitCode: code,
+          signal,
+          command,
+          cwd,
+          env_pick: pickEnv(env, ['http_proxy', 'https_proxy', 'all_proxy', 'HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY']),
+          stdout_tail_4kb: outBuf,
+          stderr_tail_4kb: errBuf,
+        }
+        logger.error(`[run] non-zero exit:\n${JSON.stringify(diag, null, 2)}`)
+        const err = new Error(`command failed with code=${code}, signal=${signal ?? 'null'}`)
+        ;(err as any).diag = diag
+        reject(err)
+      }
     })
   })
 }
 
-/** 从文本中提取所有可能的 Workshop modID（只保留纯数字，自动去重） */
-function extractModIds(text: string): string[] {
-  if (!text) return []
-  const ids = new Set<string>()
-
-  // 常见链接形式：
-  // https://steamcommunity.com/sharedfiles/filedetails/?id=3551753322
-  // https://steamcommunity.com/workshop/filedetails/?id=3551753322
-  const httpRe = /https?:\/\/steamcommunity\.com\/(?:sharedfiles|workshop)\/filedetails\/\?[^ \n]*?\bid=(\d+)/gi
-  // steam://url/CommunityFilePage/3551753322
-  const schemeRe = /steam:\/\/url\/CommunityFilePage\/(\d+)/gi
-
-  let m: RegExpExecArray | null
-  while ((m = httpRe.exec(text))) ids.add(m[1])
-  while ((m = schemeRe.exec(text))) ids.add(m[1])
-
-  // 兜底：有人只贴“id=xxxx”或纯数字
-  const looseRe = /\b(?:id=)?(\d{6,})\b/g
-  while ((m = looseRe.exec(text))) ids.add(m[1])
-
-  return [...ids]
-}
-
-/** 调用官方公开接口获取条目详情 */
-async function getWorkshopDetails(modId: string): Promise<any | null> {
-  const url = 'https://api.steampowered.com/ISteamRemoteStorage/GetPublishedFileDetails/v1/'
-  const body = new URLSearchParams()
-  body.set('itemcount', '1')
-  body.set('publishedfileids[0]', modId)
-  const resp = await fetch(url, {
-    method: 'POST',
-    body,
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-  })
-  if (!resp.ok) return null
-  const json = await resp.json().catch(() => null)
-  const list = json?.response?.publishedfiledetails
-  if (!Array.isArray(list) || !list.length) return null
-  return list[0]  // 单个
-}
-
-/** 根据 modId 解析 appId */
-async function resolveAppAndChildren(modId: string): Promise<
-  { type: 'item', appId: string, modId: string }[] | { type: 'none' }
-> {
-  const d = await getWorkshopDetails(modId)
-  if (!d || d?.result !== 1) return { type: 'none' }
-
-  // type 文档：0=普通物品/Mod；2=合集；其它类型此处不处理
-  const typeNum = Number(d.file_type ?? d.consumer_type ?? d.type ?? 0)
-  const consumerAppId = String(d.consumer_app_id ?? d.appid ?? '')
-
-  if (typeNum === 2 && Array.isArray(d.children) && d.children.length) {
-    // 合集：把 children 展开，并逐个解析 appId
-    const tasks: { type: 'item', appId: string, modId: string }[] = []
-    for (const ch of d.children) {
-      const cid = String(ch.publishedfileid)
-      const cd = await getWorkshopDetails(cid)
-      if (cd && cd.result === 1) {
-        const ca = String(cd.consumer_app_id ?? cd.appid ?? '')
-        if (ca) tasks.push({ type: 'item', appId: ca, modId: cid })
-      }
-    }
-    return tasks.length ? tasks : { type: 'none' }
-  }
-
-  if (consumerAppId) {
-    return [{ type: 'item', appId: consumerAppId, modId }]
-  }
-
-  return { type: 'none' }
+function pickEnv(env: NodeJS.ProcessEnv | Record<string, string>, keys: string[]) {
+  const out: Record<string, string | undefined> = {}
+  for (const k of keys) out[k] = (env as any)[k]
+  return out
 }
 
 // ================= 主逻辑 =================
-export function apply(ctx: Context) {
+export function apply(ctx: Context, config: Config) {
   ctx.logger.success('steam-workshop-downloader')
 
-  // 路径与参数（按你的原先逻辑）
-  const pluginPath = ctx.baseDir + '/node_modules/koishi-plugin-steam-workshop-downloader/src'
+  if (!config.appid) {
+    ctx.logger.error('配置项 appid 为空：请在配置文件中填写目标游戏的 AppID。')
+  }
+
+  const pluginPath = ctx.baseDir + '/node_modules/koishi-plugin-steam-workshop-downloader/lib'
   const steamcmdPath = pluginPath + '/steamcmd-linux/linux32/steamcmd'
   const downloadDirectory = pluginPath + '/downloads'
+
+  // 仅设置 http_proxy / https_proxy / all_proxy 三个环境变量
+  const steamcmdEnv = config.enable_proxy && config.proxy_address
+    ? {
+      http_proxy:  config.proxy_address,
+      https_proxy: config.proxy_address,
+      all_proxy:   config.proxy_address,
+    }
+    : undefined
+
+  if (config.enable_proxy) {
+    ctx.logger.info(`[proxy] 已启用代理: ${config.proxy_address}`)
+    if (config.debug) {
+      ctx.logger.info(`[proxy] 注入给 steamcmd 的环境变量: ${JSON.stringify(steamcmdEnv, null, 2)}`)
+    }
+  }
 
   ctx.middleware(async (session, next) => {
     const text = session.content || ''
@@ -143,61 +217,78 @@ export function apply(ctx: Context) {
       return next()
     }
 
-    await ensureDir(downloadDirectory)
-    await session.send(`检测到 ${modIDs.length} 个创意工坊链接，开始解析 AppID 并下载…`)
+    if (!config.appid) {
+      await session.send('❌ 未配置 appid，请在配置文件中填写目标游戏的 AppID。')
+      return
+    }
 
-    // 顺序处理，避免 steamcmd 并发冲突
+    await ensureDir(downloadDirectory)
+    await session.send(`检测到 ${modIDs.length} 个创意工坊链接，将按配置的 AppID=${config.appid} 进行下载…`)
+
     for (const modID of modIDs) {
       try {
-        await session.send(` 解析 modID=${modID} 的 AppID…`)
-        const resolved = await resolveAppAndChildren(modID)
+        const appId = String(config.appid).trim()
+        const command =
+          `${steamcmdPath} ` +
+          `+force_install_dir "${downloadDirectory}" ` +
+          `+login anonymous ` +
+          `+workshop_download_item ${appId} ${modID} ` +
+          `+quit`
 
-        if (resolved === null || (resolved as any).type === 'none' || (Array.isArray(resolved) && resolved.length === 0)) {
-          await session.send(`❌ 无法解析 AppID 或条目不可用（modID=${modID}）。`)
-          continue
-        }
+        if (config.debug) ctx.logger.info('执行命令: ' + command)
+        await session.send(`开始下载（AppID=${appId}, modID=${modID}）…`)
 
-        const items = Array.isArray(resolved) ? resolved : []
-        // 如果是合集，会有多个条目；普通物品则只有一个
-        for (const it of items) {
-          const { appId, modId } = it
-          const command =
-            `${steamcmdPath} ` +
-            `+force_install_dir "${downloadDirectory}" ` +
-            `+login anonymous ` +
-            `+workshop_download_item ${appId} ${modId} ` +
-            `+quit`
+        // ▶ 使用强诊断版执行器
+        await runCommand(ctx.logger, command, {
+          cwd: pluginPath,
+          extraEnv: steamcmdEnv,
+          printEnvKeys: ['http_proxy', 'https_proxy', 'all_proxy'],
+          debug: !!config.debug,
+        })
 
-          ctx.logger.info('执行命令: ' + command)
-          await session.send(`开始下载（AppID=${appId}, modID=${modId}）…`)
-          const { stdout, stderr } = await execAsync(command)
-          if (stderr) ctx.logger.warn(`stderr(app ${appId}, mod ${modId}): ${stderr}`)
-          ctx.logger.info(`stdout(app ${appId}, mod ${modId}): ${stdout}`)
+        const workshopDir = path.join(
+          downloadDirectory,
+          'steamapps',
+          'workshop',
+          'content',
+          String(appId),
+          String(modID),
+        )
 
-          const workshopDir = path.join(
-            downloadDirectory,
-            'steamapps',
-            'workshop',
-            'content',
-            String(appId),
-            String(modId),
-          )
-
-          const file = await findFirstFile(workshopDir)
-          if (file) {
-            ctx.logger.success(`下载完成：${file}`)
-            await session.send(`下载完成（AppID=${appId}, modID=${modId}），正在发送文件…`)
-            await sendAnyFile(session, file)
-          } else {
-            await session.send(`下载完成但未找到文件：${workshopDir}`)
-          }
+        const file = await findFirstFile(workshopDir)
+        if (file) {
+          ctx.logger.success(`下载完成：${file}`)
+          await session.send(`下载完成（AppID=${appId}, modID=${modID}），正在发送文件…`)
+          await sendAnyFile(session, file)
+        } else {
+          await session.send(`下载完成但未找到文件：${workshopDir}`)
         }
       } catch (err: any) {
+        // 这里再次兜底打印（以防上层吞错）
         ctx.logger.error(`下载失败(mod ${modID}): ${err?.message || err}`)
+        if (err?.diag) {
+          ctx.logger.error(`[diag] ${JSON.stringify(err.diag, null, 2)}`)
+        } else if (err?.stack) {
+          ctx.logger.error(`[stack] ${String(err.stack).split('\n').slice(0, 20).join('\n')}`)
+        }
         await session.send(`❌ 下载失败（modID=${modID}）：${err?.message || err}`)
       }
     }
 
     return
   })
+}
+
+/** 从文本中提取所有可能的 Workshop modID（只保留纯数字，自动去重） */
+function extractModIds(text: string): string[] {
+  if (!text) return []
+  const ids = new Set<string>()
+  const httpRe = /https?:\/\/steamcommunity\.com\/(?:sharedfiles|workshop)\/filedetails\/\?[^ \n]*?\bid=(\d+)/gi
+  const schemeRe = /steam:\/\/url\/CommunityFilePage\/(\d+)/gi
+  let m: RegExpExecArray | null
+  while ((m = httpRe.exec(text))) ids.add(m[1])
+  while ((m = schemeRe.exec(text))) ids.add(m[1])
+  const looseRe = /\b(?:id=)?(\d{6,})\b/g
+  while ((m = looseRe.exec(text))) ids.add(m[1])
+  return [...ids]
 }
