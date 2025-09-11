@@ -100,7 +100,7 @@ export async function apply(ctx: Context, config: Config) {
           await steamDownload(steamcmdPath, gameId, contentId, ctx)
           entries = await fs.readdir(file_path)
         } catch (e) {
-          await session.send([h.text('下载时出现问题：'), h.quote(session.messageId), e.message])
+          await session.send([h.quote(session.messageId), h.text('下载时出现问题：' + e.message),])
           return
         }
       }
