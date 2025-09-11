@@ -4,9 +4,7 @@ import path from 'node:path'
 import {steamDownload} from "./steam-controller";
 import {WorkshopFileResponse} from "./steam_info_types";
 import {promises as fs} from 'node:fs'
-import JSZip from 'jszip'
 import fsy from 'node:fs'
-import archiver from 'archiver'
 import {zipDirectory} from "./utils";
 
 export const name = 'steam-workshop-downloader'
@@ -120,7 +118,9 @@ export async function apply(ctx: Context, config: Config) {
         const download_link = download_base_link + path.basename(entries[0])
         console.log(download_base_link, download_link)
         session.send([h.quote(session.messageId), h.text(`下载完成，上传中\n\n如果长时间未发送文件，请将此链接复制到浏览器中进行下载\n\n${download_link}`)])
-        await session.send(<file src={download_link} title={contentName}/>)
+        const file_name = (path.basename(entries[0])).split('/')[-1]
+        await session.send(<file src={download_link} title={file_name}/>)
+        console.log(contentName)
       }
     }
   )
