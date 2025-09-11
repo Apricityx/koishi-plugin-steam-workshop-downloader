@@ -68,22 +68,44 @@ export async function apply(ctx: Context, config: Config) {
       if (contentId.length === 0 || isNaN(Number(contentId))) return
       const info: WorkshopFileResponse = await get_workshop_info(contentId)
       const title = info.response.publishedfiledetails[0].title
-      const description = info.response.publishedfiledetails[0].description
+      let description = info.response.publishedfiledetails[0].description
       const pic_url = info.response.publishedfiledetails[0].preview_url
-      await session.send([h.quote(session.messageId), h.img(pic_url), h.text("【名称】" + title), h.text("\n\n【描述】" + description), h.text("\n\n正在获取该模组，请稍候...")])
-
+      if (description.length > 200) {
+        description = description.substring(0, 200) + '...'
+      }
+      await session.send([h.quote(session.messageId), h.img(pic_url), h.text("【模组名称】" + title), h.text('\n\n【模组简介】' + description), h.text("\n\n正在获取该模组，请稍候...")])
       const gameId = String(info.response.publishedfiledetails[0].creator_app_id)
       const contentName = info.response.publishedfiledetails[0].title
-      try {
-        await steamDownload(steamcmdPath, gameId, contentId, ctx)
-      } catch (e) {
-        session.send([h.quote(session.messageId), e.message])
-        return
-      }
+
       logger.info(`用户 ${session.userId} 下载了 ${contentId}，游戏ID为 ${gameId}，下载链接：${config.download_server}:${config.download_port}/files/${gameId}/${contentId}/`)
       const download_base_link = `${config.download_server}:${config.download_port}/files/${gameId}/${contentId}/`
       const file_path = path.resolve(ctx.baseDir, 'data', 'steam-workshop-downloader', 'steamapps', 'workshop', 'content', gameId, contentId)
-      const entries = await fs.readdir(file_path)
+      // 如果文件夹不存在则创建
+      if (!fsy.existsSync(file_path)) {
+        // 递归创建目录，即使父目录也不存在
+        fsy.mkdirSync(file_path, {recursive: true});
+        logger.info(`目录 ${file_path} 创建成功！`);
+      }
+      let entries = await fs.readdir(file_path)
+      const retry_limit = 3; // 最大重试次数
+      let retryTime = 0; // 最大重试次数
+      while (entries.length === 0) {
+        if (retryTime >= retry_limit) {
+          await session.send([h.quote(session.messageId), h.text('下载失败，请稍后再试')])
+          return
+        }
+        try {
+          if (retryTime !== 0) {
+            await session.send([h.quote(session.messageId), h.text(`下载时出现问题，可能是steamcmd有更新，正在重试 (${retryTime} / ${retry_limit})`)])
+          }
+          retryTime += 1
+          await steamDownload(steamcmdPath, gameId, contentId, ctx)
+          entries = await fs.readdir(file_path)
+        } catch (e) {
+          await session.send([h.text('下载时出现问题：'), h.quote(session.messageId), e.message])
+          return
+        }
+      }
       // 如果文件大于2则先压缩后发送
       if (entries.length >= 2
       ) {
