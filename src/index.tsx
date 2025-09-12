@@ -7,8 +7,10 @@ import {WorkshopFileResponse} from "./steam_info_types";
 import {promises as fs} from 'node:fs'
 import fsy from 'node:fs'
 import {zipDirectory} from "./utils";
+import {descriptionHtml} from "./docs/desc";
 
 export const name = 'steam-workshop-downloader'
+export const usage = descriptionHtml
 
 export interface Config {
   debug: boolean
@@ -28,9 +30,9 @@ export const Config: Schema<Config> = Schema.intersect([
   }).description('基础配置'),
 
   Schema.object({
+    include_download_address: Schema.boolean().description('是否发送下载链接').default(false),
     download_server: Schema.string().description('koishi的公网地址').default('http://your_server.com'),
     download_port: Schema.number().description('koishi的端口').default(5140),
-    include_download_address: Schema.boolean().description('是否发送下载链接').default(false),
   }).description('下载服务器配置'),
 
   Schema.object({
@@ -88,15 +90,18 @@ export async function apply(ctx: Context, config: Config) {
     const title = info.response.publishedfiledetails[0].title
     let description = info.response.publishedfiledetails[0].description
     const pic_url = info.response.publishedfiledetails[0].preview_url
+    const file_size = info.response.publishedfiledetails[0].file_size
+    const file_size_mb = (parseInt(file_size) / 1024 / 1024).toFixed(2)
     if (description.length > 200) {
       description = description.substring(0, 200) + '...'
     }
-    await session.send([h.quote(session.messageId), h.img(pic_url), h.text("【模组名称】" + title), h.text('\n\n【模组简介】' + description), h.text("\n\n正在获取该模组，请稍候...")])
+    await session.send([h.quote(session.messageId), h.img(pic_url), h.text("【模组名称】" + title), h.text('\n\n【模组简介】' + description), h.text(`\n\n【文件大小】${file_size_mb}mb`), h.text("\n\n正在获取该模组，请稍候...")])
     const gameId = String(info.response.publishedfiledetails[0].creator_app_id)
     const contentName = info.response.publishedfiledetails[0].title
-
-    logger.info(`用户 ${session.userId} 下载了 ${contentId}，游戏ID为 ${gameId}，下载链接：${config.download_server}:${config.download_port}/files/${gameId}/${contentId}/`)
-    const download_base_link = `${config.download_server}:${config.download_port}/files/${gameId}/${contentId}/`
+    const downloadServer = config.download_server
+    const downloadPort = config.download_port
+    logger.info(`用户 ${session.userId} 下载了 ${contentId}，游戏ID为 ${gameId}，下载链接：${downloadServer}:${downloadPort}/files/${gameId}/${contentId}/`)
+    const download_base_link = `${downloadServer}:${downloadPort}/files/${gameId}/${contentId}/`
     const file_path = path.resolve(ctx.baseDir, 'data', 'steam-workshop-downloader', 'steamapps', 'workshop', 'content', gameId, contentId)
     // 如果文件夹不存在则创建
     if (!fsy.existsSync(file_path)) {
