@@ -1,6 +1,6 @@
 import fs from 'node:fs'
 import path from 'node:path'
-import archiver, { Archiver } from 'archiver'
+import archiver from 'archiver'
 
 type ZipOptions = {
   keepRootDirName?: boolean
@@ -11,86 +11,58 @@ type ZipOptions = {
 // 本地扩展：给 ZIP 条目加上 store（仅打包不压缩）
 type ZipEntryDataWithStore = archiver.EntryData & { store?: boolean }
 
-export async function zipDirectory(
-  dirPath: string,
-  outputZipPath: string,
-  options: ZipOptions = {}
-): Promise<void> {
-  const {
-    keepRootDirName = true,
-    ignore = [],
-    noCompressExts = [
-      'jpg','jpeg','png','gif','webp','svg','ico',
-      'mp4','mov','avi','mkv','mp3','aac','flac','ogg',
-      'zip','rar','7z','gz','bz2','xz','pdf','woff','woff2'
-    ],
-  } = options
 
-  const rel = path.relative(dirPath, outputZipPath)
-  if (!rel.startsWith('..') && !path.isAbsolute(rel)) {
-    throw new Error(`outputZipPath 不能位于被压缩目录内：\n- dirPath: ${dirPath}\n- outputZipPath: ${outputZipPath}`)
-  }
+/**
+ * 打包文件为 zip（支持可选密码加密）
+ * @param files  绝对路径数组（文件或目录）
+ * @param outputDir 输出目录（注意：这里是目录，不是文件）
+ * @param result_file_name
+ * @param password 可选；若提供则使用 AES-256 加密，并把密码写入文件名
+ * @returns 生成的 zip 文件的绝对路径
+ */
 
-  await fs.promises.mkdir(path.dirname(outputZipPath), { recursive: true })
+export async function createZip(
+  files: string[],
+  outputDir: string,
+  result_file_name: string,
+  password ?: string,
+):
+  Promise<string> {
+  const absOutputDir = path.resolve(outputDir)
+  await fs.promises.mkdir(absOutputDir, {recursive: true})
 
-  const output = fs.createWriteStream(outputZipPath)
-  const archive = archiver('zip', { zlib: { level: 9 } })
+  const safePwd = password ? password.replace(/[^a-zA-Z0-9._-]/g, '_') : ''
+  const baseName = password ? `${result_file_name}_pw-${safePwd}.zip` : `${result_file_name}.zip`
+  const zipPath = path.join(absOutputDir, baseName)
+
+  const output = fs.createWriteStream(zipPath)
+
+  const archive =
+    password
+      ? (archiver as any)('zip-encrypted', {
+        zlib: {level: 9},
+        encryptionMethod: 'aes256',
+        password,
+      } as any)
+      : archiver('zip', {zlib: {level: 9}})
 
   const done = new Promise<void>((resolve, reject) => {
     output.on('close', () => resolve())
-    archive.on('warning', (err) => ((err as any).code === 'ENOENT' ? console.warn(err) : reject(err)))
+    archive.on('warning', (err: any) => (err.code === 'ENOENT' ? console.warn(err) : reject(err)))
     archive.on('error', reject)
   })
 
   archive.pipe(output)
 
-  async function addDir(current: string, baseInZip: string) {
-    const entries = await fs.promises.readdir(current, { withFileTypes: true })
-    for (const ent of entries) {
-      const abs = path.join(current, ent.name)
-      const relFromRoot = path.relative(dirPath, abs).split(path.sep).join('/')
-
-      if (ignore.some((pat) => matchSimple(relFromRoot, pat))) continue
-
-      if (ent.isDirectory()) {
-        await addDir(abs, path.posix.join(baseInZip, ent.name))
-      } else if (ent.isFile()) {
-        const ext = path.extname(ent.name).slice(1).toLowerCase()
-        const inZipName = path.posix.join(baseInZip, ent.name)
-        const onlyStore = noCompressExts.includes(ext)
-
-        if (onlyStore) {
-          // 使用 append，可以带 store
-          archive.append(fs.createReadStream(abs), { name: inZipName, store: true } as ZipEntryDataWithStore)
-        } else {
-          // 普通文件继续用 file
-          archive.file(abs, { name: inZipName })
-        }
-      }
-    }
+  for (const file of files
+    ) {
+    const stat = await fs.promises.stat(file)
+    if (stat.isFile()) archive.file(file, {name: path.basename(file)})
+    else if (stat.isDirectory()) archive.directory(file, path.basename(file))
+    else console.warn(`[createZip] Skip unsupported path: ${file}`)
   }
-
-  const rootName = keepRootDirName ? path.basename(dirPath) : ''
-  await addDir(dirPath, rootName)
 
   await archive.finalize()
   await done
-}
-
-function matchSimple(target: string, pattern: string): boolean {
-  if (pattern.startsWith('**/')) pattern = pattern.slice(3)
-  if (pattern.endsWith('/**')) pattern = pattern.slice(0, -3)
-  if (pattern.startsWith('*') && pattern.endsWith('*')) {
-    const token = pattern.slice(1, -1)
-    return target.includes(token)
-  }
-  if (pattern.startsWith('*')) {
-    const token = pattern.slice(1)
-    return target.endsWith(token)
-  }
-  if (pattern.endsWith('*')) {
-    const token = pattern.slice(0, -1)
-    return target.startsWith(token)
-  }
-  return target === pattern
+  return zipPath
 }
