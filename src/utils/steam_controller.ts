@@ -1,5 +1,5 @@
 import {spawn} from 'node:child_process'
-import {proxy_address} from "./index";
+import {proxy_address} from "../index";
 import {Context} from "koishi";
 import path from "node:path";
 
