@@ -35,9 +35,10 @@ export const descriptionHtml = `
     <p>有的时候有些资源不登录无法下载，比如wallpaper engine需要用户登录且库中拥有该软件才可以下载对应的创意工坊</p>
     <p>配置中有一项登录steam的配置</p>
     <p>该项配置一旦输入用户名将不再使用anonymous身份登录，并且必须完成登录steam的操作</p>
-    <p>由于子程序的限制</p>
+    <p>输入指令"登录steam即可进行互动式登入steam"</p>
+    <p>接下来根据提示进行登入即可</p>
    <h2>帮助</h2>
-    <p>遇到部署问题可以找我帮忙部署，联系方式：</p>
+    <p>遇到问题可以找我帮忙部署，联系方式：</p>
     <p>Email：apricityx@qq.com</p>
     <p>Github: <a>https://github.com/Apricityx/koishi-plugin-steam-workshop-downloader</a></p>
     <p>QQ: 3026194904</p>
