@@ -1,0 +1,103 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8"/>
+  <title>卡片</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <style>
+    html {
+      margin: 0;
+      padding: 0;
+    }
+
+    body {
+      margin: 0;
+      padding: 0;
+    }
+
+    #main_cont {
+      width: 500px;
+      height: 700px;
+      border: 1px solid #000;
+      box-sizing: border-box;
+      background: #1f1f1f;
+      position: relative;
+      overflow: hidden;
+      font-family: Arial, sans-serif;
+    }
+
+    #picture_cont {
+      height: 400px;
+      width: 400px;
+      overflow: hidden;
+      border-radius: 10px;
+      position: absolute;
+      top: 10px;
+      left: 50px;
+    }
+
+    #title {
+      position: absolute;
+      top: 420px;
+      left: 50px;
+      font-size: 24px;
+      color: #e0e0e0;
+      font-weight: bold;
+    }
+
+    .chip {
+      display: inline-block;
+      background: #2d2d2d;
+      color: #fafafa;
+      border-radius: 16px;
+      padding: 6px 16px;
+      font-size: 10px;
+      margin-right: 8px;
+      margin-bottom: 8px;
+      box-shadow: 0 1px 4px rgba(0, 0, 0, 0.12);
+      font-weight: 500;
+      letter-spacing: 0.5px;
+      vertical-align: middle;
+      user-select: none;
+    }
+
+    #chips {
+      position: absolute;
+      top: 460px;
+      left: 50px;
+      display: flex;
+      flex-direction: row;
+    }
+
+    #description {
+      position: absolute;
+      top: 500px;
+      left: 50px;
+      width: 400px;
+      color: #ccc;
+      font-size: 14px;
+      line-height: 20px;
+    }
+  </style>
+</head>
+<body>
+<div id="main_cont">
+  <div id="picture_cont">
+    <img src="https://images.steamusercontent.com/ugc/1881960853799252636/32C1B78C3B7FDB1AF3EA4606151F45D2769B838C/"
+         alt="Downfall Relic Stats compatibility" style="height: 100%; width: 100%; object-fit: cover;"/>
+  </div>
+  <div id="title">
+    Hello this is a title
+  </div>
+  <div id="chips">
+    <div class="chip">更新时间：2025/4/5</div>
+    <div class="chip">文件大小：20MB</div>
+  </div>
+  <div id="description">
+    This is a description area. It can hold multiple lines of text to describe the content of the card. The text color
+    is light gray to ensure readability against the dark background.
+  </div>
+</div>
+</body>
+</html>
+

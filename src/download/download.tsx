@@ -6,6 +6,9 @@ import {steamDownload} from "../utils/steam_controller";
 import fsy, {promises as fs} from 'node:fs'
 import {pathToFileURL} from 'node:url'
 import path from 'node:path'
+import {renderCardListPage} from "../search/renderCardListPage";
+import {renderHtmlToImage} from "../search/renderHtmlToImage";
+import {renderSingleCardPage} from "../search/renderSingleCard";
 
 export const download_file_and_send = async (session, sessionContent: string, ctx: Context, config: Config) => {
   const logger = ctx.logger
@@ -58,10 +61,17 @@ export const download_file_and_send = async (session, sessionContent: string, ct
     await session.send([h.quote(session.messageId), h.text(`文件 ${title} 的大小为 ${file_size_mb}MB，超过了下载限制 ${download_size_limit}MB，下载已取消。`)])
     return
   }
-  if (description.length > 200) {
-    description = description.substring(0, 200) + '...'
-  }
-  await session.send([h.quote(session.messageId), h.img(pic_url), h.text("【模组名称】" + title), h.text('\n\n【模组简介】' + description), h.text(`\n\n【文件大小】${file_size_mb}MB`), h.text("\n\n正在获取该模组，请稍候...")])
+  // if (description.length > 200) {
+  //   description = description.substring(0, 200) + '...'
+  // }
+  const pic_binary = await renderHtmlToImage(ctx, renderSingleCardPage(info.response.publishedfiledetails[0]), {
+    height: 700,
+    width: 500,
+    format: "jpeg",
+    quality: 100
+  })
+  // await session.send([h.quote(session.messageId), h.img(pic_url), h.text("【模组名称】" + title), h.text('\n\n【模组简介】' + description), h.text(`\n\n【文件大小】${file_size_mb}MB`), h.text("\n\n正在获取该模组，请稍候...")])
+  await session.send([h.quote(session.messageId), h.image(pic_binary, 'image/webp'), h.text("正在下载该模组，请稍候")])
   const gameId = String(info.response.publishedfiledetails[0].creator_app_id)
   const downloadServer = config.download_server
   const downloadPort = config.download_port
@@ -79,10 +89,12 @@ export const download_file_and_send = async (session, sessionContent: string, ct
   let retryTime = 0; // 最大重试次数
   let result = await steamDownload(steamcmdPath, gameId, contentId, steam_account_name, ctx)
   while (result !== 0) {
-    result = await steamDownload(steamcmdPath, gameId, contentId, steam_account_name, ctx)
+    logger.info("首次下载失败，steam状态码：", result)
     if (retryTime >= retry_limit) {
       await session.send([h.quote(session.messageId), h.text(`下载失败，请稍后再试。Steam错误码 ${result}`)])
       return
+    } else if (result === 0) {
+      break
     } else if (result === 42) {
       logger.warn("steamCMD发生更新，正在重新下载")
       await session.send([h.quote(session.messageId), h.text(`steamcmd有更新，正在重新下载steamcmd (${retryTime + 1} / ${retry_limit})`)])
@@ -98,6 +110,7 @@ export const download_file_and_send = async (session, sessionContent: string, ct
       await session.send([h.quote(session.messageId), h.text(`下载时出现问题，正在重试 (${retryTime + 1} / ${retry_limit})`)])
       retryTime += 1
     }
+    result = await steamDownload(steamcmdPath, gameId, contentId, steam_account_name, ctx)
   }
   let entries = await fs.readdir(workshop_file_path)
   const file_directory = config.file_directory || ''

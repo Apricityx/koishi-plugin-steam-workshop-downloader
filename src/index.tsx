@@ -137,7 +137,7 @@ export async function apply(ctx: Context, config: Config) {
           index++
           download_prompt += `\n[${index}] ${item.title}`
         }
-        await _.session.send([h.quote(_.session.messageId), h.image(binary_cards, 'image/png'), h.text(`【页码 （${parseInt(page) || 0} / ${Math.ceil(data.total / 5)}） 发送"下一页"来翻页】\n可以使用创意工坊搜索 [搜索内容] [页码] 来查看其他页面${download_prompt}`)])
+        await _.session.send([h.quote(_.session.messageId), h.image(binary_cards, 'image/webp'), h.text(`【页码 （${parseInt(page) || 0} / ${Math.ceil(data.total / 5)}） 发送"下一页"来翻页】\n可以使用创意工坊搜索 [搜索内容] [页码] 来查看其他页面${download_prompt}`)])
         let id = await _.session.prompt(30 * Time.second)
         if (!id) {
           return
