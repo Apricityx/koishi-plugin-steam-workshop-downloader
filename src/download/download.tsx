@@ -8,8 +8,13 @@ import {pathToFileURL} from 'node:url'
 import path from 'node:path'
 
 export const download_file_and_send = async (session, sessionContent: string, ctx: Context, config: Config) => {
-  const steamcmdPath = path.resolve(ctx.baseDir, 'node_modules', 'koishi-plugin-steam-workshop-downloader', 'lib', 'steamcmd-linux', 'linux32', 'steamcmd')
   const logger = ctx.logger
+  let steam_account_name = config.steam_account_name
+  if (!steam_account_name || steam_account_name.trim().length === 0) {
+    steam_account_name = 'anonymous'
+    logger.warn("steam账号未设置，默认使用anonymous账号下载，可能会导致无法下载某些mod\n可以使用指令‘登录steam来完成登录’")
+  }
+  const steamcmdPath = path.resolve(ctx.baseDir, 'node_modules', 'koishi-plugin-steam-workshop-downloader', 'lib', 'steamcmd-linux', 'linux32', 'steamcmd')
   const get_workshop_info = async (contentId: string): Promise<WorkshopFileResponse> => {
     const form = new URLSearchParams()
     form.set("itemcount", "1")
@@ -64,40 +69,51 @@ export const download_file_and_send = async (session, sessionContent: string, ct
     fsy.mkdirSync(workshop_file_path, {recursive: true});
     logger.info(`目录 ${workshop_file_path} 创建成功！`);
   }
-  let flag = 1;
-  let entries = await fs.readdir(workshop_file_path)
+  console.log("DEBUG", workshop_file_path)
   const retry_limit = 3; // 最大重试次数
   let retryTime = 0; // 最大重试次数
-  while (entries.length === 0 || flag) {
+  let result = await steamDownload(steamcmdPath, gameId, contentId, steam_account_name, ctx)
+  while (result !== 0) {
+    result = await steamDownload(steamcmdPath, gameId, contentId, steam_account_name, ctx)
     if (retryTime >= retry_limit) {
-      await session.send([h.quote(session.messageId), h.text('下载失败，请稍后再试')])
+      await session.send([h.quote(session.messageId), h.text(`下载失败，请稍后再试。Steam错误码 ${result}`)])
       return
-    }
-    try {
-      if (retryTime !== 0 || !flag) {
-        await session.send([h.quote(session.messageId), h.text(`下载时出现问题，可能是steamcmd有更新，正在重试 (${retryTime} / ${retry_limit})`)])
-      }
+    } else if (result === 42) {
+      logger.warn("steamCMD发生更新，正在重新下载")
+      await session.send([h.quote(session.messageId), h.text(`steamcmd有更新，正在重新下载steamcmd (${retryTime + 1} / ${retry_limit})`)])
+    } else if (result === 5) {
+      logger.error("请重新登录steam，steam账号可能需要重新验证，将使用anonymous账号继续下载")
+      await session.send([h.quote(session.messageId), h.text('请联系管理员重新登录steam，steam账号可能需要重新登录验证')])
+      steam_account_name = 'anonymous'
+    } else if (result === 3) {
+      logger.error("请重新登录steam，steam账号可能需要重新验证，将使用anonymous账号继续下载")
+      await session.send([h.quote(session.messageId), h.text('下载失败，极大可能是因为权限问题，请联系管理员重新登录steam')])
+      return
+    } else {
+      await session.send([h.quote(session.messageId), h.text(`下载时出现问题，正在重试 (${retryTime + 1} / ${retry_limit})`)])
       retryTime += 1
-      await steamDownload(steamcmdPath, gameId, contentId, ctx)
-      entries = await fs.readdir(workshop_file_path)
-      flag = 0
-    } catch (e) {
-      await session.send([h.quote(session.messageId), h.text('下载时出现问题：' + e.message),])
-      return
     }
   }
+  let entries = await fs.readdir(workshop_file_path)
   const file_directory = config.file_directory || ''
   const file_bot_path = path.resolve(file_directory, 'data', 'steam-workshop-downloader', 'steamapps', 'workshop', 'content', gameId, contentId)
   // 如果文件大于2则先压缩后发送
   logger.info('下载完成，文件数量：' + entries.length)
   const files_full_path = entries.map((entry) => path.resolve(workshop_file_path, entry))
-  logger.info(files_full_path)
+  // logger.info(files_full_path)
   let file_path = path.resolve(ctx.baseDir, 'data', 'steam-workshop-downloader', 'steamapps', 'workshop', 'content', gameId, contentId)
   let download_complete_message = '下载完成，上传中'
-
   let download_link = ''
   if (entries.length >= 2) {
-    file_path = await createZip(files_full_path, path.resolve(ctx.baseDir, 'data', 'steam-workshop-downloader', 'steamapps', 'workshop', 'content', gameId, 'zip'), title, password)
+    logger.info('文件数量大于1，准备压缩文件')
+    try {
+      file_path = await createZip(files_full_path, path.resolve(ctx.baseDir, 'data', 'steam-workshop-downloader', 'steamapps', 'workshop', 'content', gameId, 'zip'), title, password)
+    } catch (e) {
+      // 此处极大概率捕捉不到错误
+      logger.error('压缩文件时出现错误：' + e.message)
+      await session.send([h.quote(session.messageId), h.text('压缩文件时出现错误：' + e.message),])
+      return
+    }
     logger.info("文件过多，已压缩为zip文件，路径：" + file_path)
     download_complete_message += `\n\n因为文件数量较多，将压缩为zip文件发送`
     if (password) {
@@ -120,6 +136,7 @@ export const download_file_and_send = async (session, sessionContent: string, ct
       file_path = files_full_path[0]
     }
   }
+  console.log("DEBUG", file_path)
   download_link = download_base_link + file_path.split(path.resolve(ctx.baseDir, 'data', 'steam-workshop-downloader', 'steamapps', 'workshop', 'content', gameId))[1].replace(/\\/g, '/')
   logger.info(`下载步骤完成，最终发送路径：${file_path} 最终下载链接：${download_link}`)
   await session.send([h.quote(session.messageId), h.text(download_complete_message)])

@@ -31,6 +31,11 @@ export const descriptionHtml = `
     <h3>本地文件传输模式</h3>
     <p>此模式下需要打开enable_no_public，file_directory的值必须是bot端和koishi端都能通过这个地址访问到的koishi主文件夹地址，即为koishi.yml所在目录</p>
     <p style="color:red">如果需要使用代理，需要在proxy-agent插件中也配置代理</p>
+    <h3>登录steam</h3>
+    <p>有的时候有些资源不登录无法下载，比如wallpaper engine需要用户登录且库中拥有该软件才可以下载对应的创意工坊</p>
+    <p>配置中有一项登录steam的配置</p>
+    <p>该项配置一旦输入用户名将不再使用anonymous身份登录，并且必须完成登录steam的操作</p>
+    <p>由于子程序的限制</p>
    <h2>帮助</h2>
     <p>遇到部署问题可以找我帮忙部署，联系方式：</p>
     <p>Email：apricityx@qq.com</p>
@@ -39,6 +44,4 @@ export const descriptionHtml = `
     <p>欢迎提Issue与PR</p>
 </body>
 </html>
-
-
 `

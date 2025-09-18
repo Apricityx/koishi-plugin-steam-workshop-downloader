@@ -8,6 +8,8 @@ import {renderCardListPage} from "./search/renderCardListPage";
 import {renderHtmlToImage} from "./search/renderHtmlToImage";
 import {download_file_and_send} from "./download/download";
 import {Time} from 'koishi'
+import path from "node:path";
+import {steamLogin, steamLogout} from "./utils/steam_controller";
 
 export const name = 'steam-workshop-downloader'
 export const usage = descriptionHtml
@@ -28,6 +30,7 @@ export interface Config {
   enable_no_public: boolean
   file_directory: string
   steam_api_key: string
+  steam_account_name: string
   default_game_id: number
 }
 
@@ -35,6 +38,7 @@ let ctx_: Context
 export const Config: Schema<Config> = Schema.intersect([
   Schema.object({
     debug: Schema.boolean().description('是否启动调试模式').default(false),
+    steam_account_name: Schema.string().description('steam账号名称，请使用指令"登录steam"来登录steamcmd')
   }).description('基础配置'),
 
   Schema.object({
@@ -106,6 +110,9 @@ export async function apply(ctx: Context, config: Config) {
 
   ctx.command('创意工坊搜索 <search_content> [page] [game_id]')
     .action(async (_, search_content, page, game_id) => {
+
+        logger.info("用户 " + _.session.userId + " 搜索了 " + search_content + " 页码：" + (page || '1') + " 游戏ID：" + (game_id || config.default_game_id))
+
         if (!ctx_.puppeteer) return "未安装puppeteer，无法使用搜索功能"
         if (!config.steam_api_key) return "未设置steam api key，无法使用搜索功能"
         if (page === undefined) page = '1'
@@ -121,8 +128,8 @@ export async function apply(ctx: Context, config: Config) {
           logger.warn('puppeteer渲染HTML失败', e)
           return "渲染图片失败，服务器网络可能无法访问steam网络，请稍候再试"
         }
-        const binary_cards = await renderHtmlToImage(ctx, rendered_html, {height: 1088})
-        let download_prompt = '\n30s内发送模组编号可以直接下载模组\n若模组已下载但长时间没有发送，请在编号后带nsfw字样，例如"1 nsfw"\n[0] 不执行下载操作'
+        const binary_cards = await renderHtmlToImage(ctx, rendered_html, {height: 100})
+        let download_prompt = '\n30s内发送模组编号可以直接下载模组\n若模组已下载但长时间没有发送，请在编号后带-nsfw参数，例如"1 -nsfw"\n[0] 不执行下载操作'
         let index = 0
         for (const item of data.publishedfiledetails || []) {
           index++
@@ -134,15 +141,15 @@ export async function apply(ctx: Context, config: Config) {
           return
         }
         let nsfw = false
-        if (id.includes('nsfw')) {
+        if (id.includes('-nsfw')) {
           nsfw = true
-          id = id.replace('nsfw', '')
+          id = id.replace('-nsfw', '')
           id = id.trim()
         }
 
         // 如果用户输入下一页则翻页
         if (id === '下一页') {
-          await _.session.execute(`创意工坊搜索 ${search_content} ${parseInt(page) + 1}`)
+          await _.session.execute(`创意工坊搜索 ${search_content} ${parseInt(page) + 1} ${game_id}`)
           return
         }
 
@@ -171,8 +178,64 @@ export async function apply(ctx: Context, config: Config) {
         return
       }
     )
-}
 
+  ctx.command('登录steam')
+    .action(async (_, search_content, page, game_id) => {
+      await _.session.send([h.quote(_.session.messageId), h.text("警告⚠️ 进行此操作时请在控制台或者在私聊中进行，避免账号信息泄露\n在确认当前聊天安全的情况下，发送confirm开始登录")])
+      const user_confirmation = await _.session.prompt(30 * Time.second)
+      if (user_confirmation !== 'confirm') {
+        return [h.quote(_.session.messageId), h.text("已取消登录")]
+      }
+      const account_name = config.steam_account_name
+      if (!account_name || account_name.trim().length === 0) {
+        return [h.quote(_.session.messageId), h.text("steam账号名称未设置，请前往插件配置中设置")]
+      }
+      await _.session.send([h.quote(_.session.messageId), h.text(`即将进行账户${config.steam_account_name}\n请在120s内输入steam账号密码`)])
+      const password = await _.session.prompt(120 * Time.second)
+      await _.session.send([h.quote(_.session.messageId), h.text(`请等待steam guard手机令牌转一圈后输入令牌`)])
+      const steam_guard_code = await _.session.prompt(120 * Time.second)
+      await _.session.send([h.quote(_.session.messageId), h.text(`正在登录steam，请稍候`)])
+      try {
+        const steamcmdPath = path.resolve(ctx.baseDir, 'node_modules', 'koishi-plugin-steam-workshop-downloader', 'lib', 'steamcmd-linux', 'linux32', 'steamcmd')
+        const result = await steamLogin(steamcmdPath, account_name, password, steam_guard_code, ctx)
+        let text: string
+        switch (result) {
+          case 0:
+            text = "登录成功，可以开始下载需要登录的mod了"
+            break
+          case 5:
+            text = "登录失败，错误的密码或steam guard代码，如果令牌刷新了才完成登录过程请等待令牌转一圈后再尝试登录"
+            logger.error(text)
+            break
+          case 42:
+            text = "登录失败，steamcmd更新了，请重新登录"
+            logger.error(text)
+            break
+          default:
+            text = "登录失败，未知错误，请查看控制台日志并联系开发者"
+            logger.error(text)
+            break
+        }
+        return [h.quote(_.session.messageId), h.text(text)]
+      } catch (e) {
+        logger.error("登陆失败", e)
+        await _.session.send([h.quote(_.session.messageId), h.text(`登录失败，请查看控制台日志并联系开发者`)])
+      }
+    })
+
+  ctx.command('登出steam')
+    .action(async (_) => {
+      const steamcmdPath = path.resolve(ctx.baseDir, 'node_modules', 'koishi-plugin-steam-workshop-downloader', 'lib', 'steamcmd-linux', 'linux32', 'steamcmd')
+      await _.session.send("是否确认登出steam? (y/N)")
+      const confirmation = await _.session.prompt(30 * Time.second)
+      if (confirmation?.toLowerCase() !== 'y') {
+        return [h.quote(_.session.messageId), h.text("已取消登出")]
+      } else {
+        await steamLogout(steamcmdPath, ctx)
+        return [h.quote(_.session.messageId), h.text("已登出steam")]
+      }
+    })
+}
 
 const search_workshop = async (
   query: string,
