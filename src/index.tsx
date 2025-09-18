@@ -104,31 +104,70 @@ export async function apply(ctx: Context, config: Config) {
     await download_file_and_send(session, session.content, ctx, config)
   })
 
-  ctx.command('创意工坊搜索 <search_content> [page]')
-    .action(async (_, search_content, page) => {
+  ctx.command('创意工坊搜索 <search_content> [page] [game_id]')
+    .action(async (_, search_content, page, game_id) => {
         if (!ctx_.puppeteer) return "未安装puppeteer，无法使用搜索功能"
         if (!config.steam_api_key) return "未设置steam api key，无法使用搜索功能"
         if (page === undefined) page = '1'
-        if (!search_content) return "指令用法：创意工坊搜索 [搜索内容] [页码]"
-        const data = await search_workshop(search_content, config.steam_api_key, config.default_game_id, parseInt(page), 5)
-        const rendered_html = renderCardListPage(data?.publishedfiledetails || [])
+        if (!search_content) return "指令用法：创意工坊搜索 [搜索内容] (页码) (游戏id)\n[]为必填，()为选填"
+        if (game_id === undefined) {
+          game_id = String(config.default_game_id)
+        }
+        const data = await search_workshop(search_content, config.steam_api_key, parseInt(game_id), parseInt(page), 5)
+        let rendered_html: string
+        try {
+          rendered_html = renderCardListPage(data?.publishedfiledetails || [])
+        } catch (e) {
+          logger.warn('puppeteer渲染HTML失败', e)
+          return "渲染图片失败，服务器网络可能无法访问steam网络，请稍候再试"
+        }
         const binary_cards = await renderHtmlToImage(ctx, rendered_html, {height: 1088})
-        let download_prompt = '\n30s内发送模组编号可以直接下载模组\n[0] 不执行下载操作'
+        let download_prompt = '\n30s内发送模组编号可以直接下载模组\n若模组已下载但长时间没有发送，请在编号后带nsfw字样，例如"1 nsfw"\n[0] 不执行下载操作'
         let index = 0
         for (const item of data.publishedfiledetails || []) {
           index++
           download_prompt += `\n[${index}] ${item.title}`
         }
-        await _.session.send([h.quote(_.session.messageId), h.image(binary_cards, 'image/png'), h.text(`页码 （${parseInt(page) || 0} / ${data.total / 5}）\n可以使用创意工坊搜索 [搜索内容] [页码] 来查看其他页面${download_prompt}`)])
-        const id = await _.session.prompt(30 * Time.second)
-        if (!id) return [h.quote(_.session.messageId), h.text("已取消下载")]
+        await _.session.send([h.quote(_.session.messageId), h.image(binary_cards, 'image/png'), h.text(`【页码 （${parseInt(page) || 0} / ${Math.ceil(data.total / 5)}） 发送"下一页"来翻页】\n可以使用创意工坊搜索 [搜索内容] [页码] 来查看其他页面${download_prompt}`)])
+        let id = await _.session.prompt(30 * Time.second)
+        if (!id) {
+          return
+        }
+        let nsfw = false
+        if (id.includes('nsfw')) {
+          nsfw = true
+          id = id.replace('nsfw', '')
+          id = id.trim()
+        }
+
+        // 如果用户输入下一页则翻页
+        if (id === '下一页') {
+          await _.session.execute(`创意工坊搜索 ${search_content} ${parseInt(page) + 1}`)
+          return
+        }
+
         // 如果id在0-5之间则下载对应的mod
         const id_num = parseInt(id)
         if (isNaN(id_num) || id_num < 0 || id_num > (data.publishedfiledetails?.length || 0)) {
-          return [h.quote(_.session.messageId), h.text("输入有误，已取消下载")]
+          // 如果用户输入不为数字则尝试作为命令执行
+          const text = id;
+          await (async () => {
+            try {
+              // session.execute 会按当前会话解析并尝试执行命令
+              // 若确实匹配到命令，它会把执行结果返回（string/segment/void 皆有可能）
+              const result = await _.session.execute(text)
+              return result !== undefined
+            } catch {
+              // 不是有效命令或执行失败，就当没匹配到
+              return false
+            }
+          })()
+          return
+          // return [h.quote(_.session.messageId), h.text("输入有误，已取消下载")]
         }
         if (id_num === 0) return [h.quote(_.session.messageId), h.text("已取消下载")]
-        await download_file_and_send(_.session, 'https://steamcommunity.com/sharedfiles/filedetails/?id=' + data.publishedfiledetails![id_num - 1].publishedfileid, ctx, config)
+        console.log('https://steamcommunity.com/sharedfiles/filedetails/?id=' + data.publishedfiledetails![id_num - 1].publishedfileid + (nsfw ? ' nsfw' : ''))
+        await download_file_and_send(_.session, 'https://steamcommunity.com/sharedfiles/filedetails/?id=' + data.publishedfiledetails![id_num - 1].publishedfileid + (nsfw ? ' nsfw' : ''), ctx, config)
         return
       }
     )
@@ -153,7 +192,7 @@ const search_workshop = async (
   params.set('return_details', 'true')
 
   const url = `https://api.steampowered.com/IPublishedFileService/QueryFiles/v1/?${params.toString()}`
-  ctx_.logger('steam-workshop-downloader').info('搜索创意工坊，url：' + params.toString())
+  // ctx_.logger('steam-workshop-downloader').info('搜索创意工坊，url：' + params.toString())
   const data = await ctx_.http.get<QueryFilesResp>(url, {
     headers: {Accept: 'application/json'},
   })

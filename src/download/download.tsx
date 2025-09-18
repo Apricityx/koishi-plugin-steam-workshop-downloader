@@ -29,6 +29,7 @@ export const download_file_and_send = async (session, sessionContent: string, ct
     password = Math.random().toString(36).substring(2, 10)
     logger.info('触发nsfw，设置密码为 ' + password)
   }
+  console.log(sessionContent)
   let temp = sessionContent.split('https://steamcommunity.com/sharedfiles/filedetails/?id=')
   if (temp.length < 2) {
     temp = sessionContent.split('https://steamcommunity.com/workshop/filedetails/?id=')
@@ -36,6 +37,7 @@ export const download_file_and_send = async (session, sessionContent: string, ct
   console.log(temp)
   if (temp.length !== 2) return
   let contentId = temp[1]
+  contentId = contentId.trim()
   if (contentId.includes('&')) {
     contentId = contentId.split('&')[0]
   }
