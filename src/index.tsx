@@ -32,13 +32,15 @@ export interface Config {
   steam_api_key: string
   steam_account_name: string
   default_game_id: number
+  download_size_limit: number
 }
 
 let ctx_: Context
 export const Config: Schema<Config> = Schema.intersect([
   Schema.object({
     debug: Schema.boolean().description('是否启动调试模式').default(false),
-    steam_account_name: Schema.string().description('steam账号名称，请使用指令"登录steam"来登录steamcmd')
+    steam_account_name: Schema.string().description('steam账号名称，请使用指令"登录steam"来登录steamcmd'),
+    download_size_limit: Schema.number().default(1024).description("下载大小限制，单位MB"),
   }).description('基础配置'),
 
   Schema.object({

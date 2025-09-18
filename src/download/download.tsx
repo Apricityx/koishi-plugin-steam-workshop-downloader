@@ -53,6 +53,11 @@ export const download_file_and_send = async (session, sessionContent: string, ct
   const pic_url = info.response.publishedfiledetails[0].preview_url
   const file_size = info.response.publishedfiledetails[0].file_size
   const file_size_mb = (parseInt(file_size) / 1024 / 1024).toFixed(2)
+  let download_size_limit = config.download_size_limit
+  if (parseInt(file_size_mb) > download_size_limit) {
+    await session.send([h.quote(session.messageId), h.text(`文件 ${title} 的大小为 ${file_size_mb}MB，超过了下载限制 ${download_size_limit}MB，下载已取消。`)])
+    return
+  }
   if (description.length > 200) {
     description = description.substring(0, 200) + '...'
   }

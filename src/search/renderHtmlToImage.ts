@@ -30,7 +30,7 @@ export async function renderHtmlToImage(
     fullPage = true,
     waitUntil = 'networkidle0',
     format = 'webp',
-    quality = 70,
+    quality = 85,
     transparent = false,
     clip,
     onSize,
