@@ -171,7 +171,7 @@ export async function apply(ctx: Context, config: Config) {
               return false
             }
           })()
-          return
+          return [h.quote(_.session.messageId), h.text("输入其他内容，已结束搜索交互")]
           // return [h.quote(_.session.messageId), h.text("输入有误，已取消下载")]
         }
         if (id_num === 0) return [h.quote(_.session.messageId), h.text("已取消下载")]
@@ -252,9 +252,10 @@ const search_workshop = async (
   params.set('search_text', query)
   params.set('page', String(page))
   params.set('numperpage', String(numPerPage))
-  params.set('return_tags', 'true')
-  params.set('return_vote_data', 'true')
+  // params.set('return_tags', 'true')
+  // params.set('return_vote_data', 'true')
   params.set('return_details', 'true')
+  params.set('language', "6")
 
   const url = `https://api.steampowered.com/IPublishedFileService/QueryFiles/v1/?${params.toString()}`
   // ctx_.logger('steam-workshop-downloader').info('搜索创意工坊，url：' + params.toString())
