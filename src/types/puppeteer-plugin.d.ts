@@ -1,4 +1,4 @@
-import type { Browser, Page } from 'puppeteer'
+import type {Browser, Page} from 'puppeteer'
 import 'koishi'
 
 declare module 'koishi' {
@@ -13,6 +13,7 @@ declare module 'koishi' {
       launch(): Promise<void>
       close(): Promise<void>
       page(): Promise<Page>
+      stop(): Promise<void>
     }
   }
 }

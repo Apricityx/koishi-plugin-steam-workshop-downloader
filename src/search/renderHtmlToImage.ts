@@ -82,11 +82,11 @@ export async function renderHtmlToImage(
 
     // 回调通知体积
     if (typeof onSize === 'function') onSize(bytes)
-
+    await page.close()
+    await ctx.puppeteer.stop()
     return buf
   } finally {
     await page.close()
-    // 如需彻底释放浏览器连接，可在合适时机调用：
-    // await ctx.puppeteer.stop()
+    await ctx.puppeteer.stop()
   }
 }
