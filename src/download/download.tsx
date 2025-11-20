@@ -37,12 +37,10 @@ export const download_file_and_send = async (session, sessionContent: string, ct
     password = Math.random().toString(36).substring(2, 10)
     logger.info('触发nsfw，设置密码为 ' + password)
   }
-  console.log(sessionContent)
   let temp = sessionContent.split('https://steamcommunity.com/sharedfiles/filedetails/?id=')
   if (temp.length < 2) {
     temp = sessionContent.split('https://steamcommunity.com/workshop/filedetails/?id=')
   }
-  console.log(temp)
   if (temp.length !== 2) return
   let contentId = temp[1]
   contentId = contentId.trim()
@@ -50,11 +48,24 @@ export const download_file_and_send = async (session, sessionContent: string, ct
     contentId = contentId.split('&')[0]
   }
   if (contentId.length === 0 || isNaN(Number(contentId))) return
+  // contentId 处理完成
+  const dbQuery = (await ctx.database.get('blackList', { id: Number(contentId) }).catch(()=> []))
+  if (dbQuery.length > 0 && !sessionContent.includes("apricityx")) {
+    await session.send([h.quote(session.messageId), h.text(`该模组在黑名单中，无法下载。`)])
+    return
+  }
+
   const info: WorkshopFileResponse = await get_workshop_info(contentId)
+  logger.info(`解析模组 ${contentId} 完成，${JSON.stringify(info)}`)
   const title = info.response.publishedfiledetails[0].title
   let description = info.response.publishedfiledetails[0].description
   const pic_url = info.response.publishedfiledetails[0].preview_url
   const file_size = info.response.publishedfiledetails[0].file_size
+  const info_result = info.response.publishedfiledetails[0].result
+  if (info_result !== 1) {
+    await session.send([h.quote(session.messageId), h.text(`获取模组信息失败，可能是该模组不存在，错误码 ${info_result}，模组ID ${contentId}，下载已取消。`)])
+    return
+  }
   const file_size_mb = (parseInt(file_size) / 1024 / 1024).toFixed(2)
   let download_size_limit = config.download_size_limit
   if (parseInt(file_size_mb) > download_size_limit) {
@@ -64,14 +75,21 @@ export const download_file_and_send = async (session, sessionContent: string, ct
   // if (description.length > 200) {
   //   description = description.substring(0, 200) + '...'
   // }
-  const pic_binary = await renderHtmlToImage(ctx, renderSingleCardPage(info.response.publishedfiledetails[0]), {
-    height: 700,
-    width: 500,
-    format: "jpeg",
-    quality: 100
-  })
-  // await session.send([h.quote(session.messageId), h.img(pic_url), h.text("【模组名称】" + title), h.text('\n\n【模组简介】' + description), h.text(`\n\n【文件大小】${file_size_mb}MB`), h.text("\n\n正在获取该模组，请稍候...")])
-  await session.send([h.quote(session.messageId), h.image(pic_binary, 'image/webp'), h.text("正在下载该模组，请稍候")])
+  if (ctx.puppeteer){
+    logger.info("开始生成模组卡片图片")
+    const pic_binary = await renderHtmlToImage(ctx, renderSingleCardPage(info.response.publishedfiledetails[0]), {
+      height: 700,
+      width: 500,
+      format: "jpeg",
+      quality: 100
+    })
+    logger.info("生成图片完成")
+    await session.send([h.quote(session.messageId), h.image(pic_binary, 'image/webp'), h.text("正在下载该模组，请稍候")])
+  }
+  else{
+    await session.send([h.quote(session.messageId), h.img(pic_url), h.text("【模组名称】" + title), h.text('\n\n【模组简介】' + description), h.text(`\n\n【文件大小】${file_size_mb}MB`), h.text("\n\n正在获取该模组，请稍候...")])
+  }
+
   const gameId = String(info.response.publishedfiledetails[0].creator_app_id)
   const downloadServer = config.download_server
   const downloadPort = config.download_port

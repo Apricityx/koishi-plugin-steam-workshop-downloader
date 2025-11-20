@@ -19,6 +19,16 @@ try {
 } catch (e) {
   // do nothing
 }
+// 注册黑名单数据库
+declare module 'koishi' {
+  interface Tables {
+    blackList: BackList
+  }
+}
+
+export interface BackList {
+  id: number
+}
 
 export interface Config {
   debug: boolean
@@ -87,7 +97,7 @@ declare module 'koishi' {
   }
 }
 export const inject = {
-  required: ['server'],
+  required: ['server','database'],
   optional: ['puppeteer'], // 如果要使用搜索功能则需要puppeteer
 }
 
@@ -237,6 +247,37 @@ export async function apply(ctx: Context, config: Config) {
         await steamLogout(steamcmdPath, ctx)
         return [h.quote(_.session.messageId), h.text("已登出steam")]
       }
+    })
+  /**
+   * 黑名单
+   */
+
+
+// 这里是新增表的接口类型
+
+
+  ctx.model.extend('blackList', {
+    // 各字段的类型声明
+    id: 'unsigned',
+  })
+
+  ctx.command('创意工坊黑名单添加 <id>')
+    .action(async (_, id) => {
+      // 约束id必须为数字
+      logger.info(id)
+      if (id === undefined || isNaN(Number(id)) || id === '') {
+        return h.text('指令用法：创意工坊黑名单添加 [mod id]')
+      }
+      await ctx.database.create('blackList', {
+        id: Number(id),
+      }).catch((err: Error) => {
+        if (err.message.startsWith("UNIQUE constraint failed:")) {
+          return h.text('该mod已在黑名单中，无需重复添加')
+        } else {
+          return h.text('添加黑名单失败，发生错误：' + err.message)
+        }
+      })
+      return h.text(`已将mod ${id} 添加到黑名单，后续下载将被阻止`)
     })
 }
 
