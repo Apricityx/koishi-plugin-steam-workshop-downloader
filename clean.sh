@@ -2,6 +2,7 @@ cd lib
 rm -rf ./steamcmd-linux/linux64
 rm -rf ./steamcmd-linux/package
 rm -rf ./steamcmd-linux/public
+rm -rf ./steamcmd-linux/steamcmd-windows
 rm -rf ./steamcmd-linux/siteserverui
 rm -rf ./steamcmd-linux/linux32/logs
 
