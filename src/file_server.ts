@@ -10,7 +10,7 @@ export const init_server = (ctx: Context) => {
   const resolveSafe = (p: string): string | null => {
     const sub = p.replace(/^\/+/, '')
     const abs = path.resolve(targetDir, sub)
-    return abs.startsWith(targetDir) ? abs : null
+    return (abs === targetDir || abs.startsWith(targetDir + path.sep)) ? abs : null
   }
 
   const MOUNT = '/files'
@@ -92,7 +92,29 @@ export const init_server = (ctx: Context) => {
 </html>`
   }
 
-  // 1) 浏览根目录：GET {MOUNT}
+  const render404 = (url: string): string => {
+  return `<!doctype html>
+          <html lang="zh-CN">
+          <head>
+            <meta charset="utf-8">
+            <title>404 Not Found</title>
+            <style>
+              body { font-family: sans-serif; background:#fafafa; text-align:center; padding:80px; }
+              h1 { font-size: 48px; color:#d33; }
+              p { margin-top: 20px; color:#555; }
+              a { color:#06c; text-decoration:none; }
+              a:hover { text-decoration:underline; }
+            </style>
+          </head>
+          <body>
+            <h1>404</h1>
+            <p>路径不存在: <code>${url}</code></p>
+            <p><a href="/files">返回首页</a></p>
+          </body>
+          </html>`
+}
+
+// 1) 浏览根目录：GET {MOUNT}
   ctx.server.get(MOUNT, async (koaCtx) => {
     const rel = '' // 根
     const abs = resolveSafe(rel)!
@@ -107,7 +129,40 @@ export const init_server = (ctx: Context) => {
     }
   })
 
-  // 2) 浏览子目录或文件：GET {MOUNT}/(.*)
+  // 3) 显式下载接口：GET {MOUNT}/download/(.*)
+  ctx.server.get(`${MOUNT}/download/(.*)`, async (koaCtx) => {
+    const rel = String(koaCtx.params[0] || '').replace(/^\/+/, '').replace(/\\/g, '/')
+    const abs = resolveSafe(rel)
+    if (!abs) {
+      koaCtx.status = 400
+      koaCtx.body = 'Invalid path'
+      return
+    }
+    try {
+      const stat = await fs.promises.stat(abs)
+      if (!stat.isFile()) {
+        koaCtx.status = 400
+        koaCtx.body = 'Not a file'
+        return
+      }
+      const base = path.basename(abs)
+      koaCtx.set('Content-Disposition', `attachment; filename="${encodeURIComponent(base)}"`)
+      koaCtx.body = fs.createReadStream(abs)
+      logger.info(`下载: /${rel}`)
+    } catch (e: any) {
+      if (e?.code === 'ENOENT') {
+        koaCtx.status = 404
+        koaCtx.body = 'Not found'
+      } else {
+        logger.error(e)
+        koaCtx.status = 500
+        koaCtx.body = 'Server error'
+      }
+    }
+  })
+  
+
+// 2) 浏览子目录或文件：GET {MOUNT}/(.*)
   ctx.server.get(`${MOUNT}/(.*)`, async (koaCtx) => {
     const rel = String(koaCtx.params[0] || '').replace(/^\/+/, '').replace(/\\/g, '/')
     const abs = resolveSafe(rel)
@@ -143,57 +198,7 @@ export const init_server = (ctx: Context) => {
     }
   })
 
-  // 3) 显式下载接口：GET {MOUNT}/download/(.*)
-  ctx.server.get(`${MOUNT}/download/(.*)`, async (koaCtx) => {
-    const rel = String(koaCtx.params[0] || '').replace(/^\/+/, '').replace(/\\/g, '/')
-    const abs = resolveSafe(rel)
-    if (!abs) {
-      koaCtx.status = 400
-      koaCtx.body = 'Invalid path'
-      return
-    }
-    try {
-      const stat = await fs.promises.stat(abs)
-      if (!stat.isFile()) {
-        koaCtx.status = 400
-        koaCtx.body = 'Not a file'
-        return
-      }
-      const base = path.basename(abs)
-      koaCtx.set('Content-Disposition', `attachment; filename="${encodeURIComponent(base)}"`)
-      koaCtx.body = fs.createReadStream(abs)
-      logger.info(`下载: /${rel}`)
-    } catch (e: any) {
-      if (e?.code === 'ENOENT') {
-        koaCtx.status = 404
-        koaCtx.body = 'Not found'
-      } else {
-        logger.error(e)
-        koaCtx.status = 500
-        koaCtx.body = 'Server error'
-      }
-    }
-  })
-  const render404 = (url: string): string => {
-    return `<!doctype html>
-            <html lang="zh-CN">
-            <head>
-              <meta charset="utf-8">
-              <title>404 Not Found</title>
-              <style>
-                body { font-family: sans-serif; background:#fafafa; text-align:center; padding:80px; }
-                h1 { font-size: 48px; color:#d33; }
-                p { margin-top: 20px; color:#555; }
-                a { color:#06c; text-decoration:none; }
-                a:hover { text-decoration:underline; }
-              </style>
-            </head>
-            <body>
-              <h1>404</h1>
-              <p>路径不存在: <code>${url}</code></p>
-              <p><a href="/files">返回首页</a></p>
-            </body>
-            </html>`
+  
   }
 
 }

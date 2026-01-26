@@ -9,6 +9,7 @@ import {renderHtmlToImage} from "./search/renderHtmlToImage";
 import {download_file_and_send} from "./download/download";
 import {Time} from 'koishi'
 import path from "node:path";
+import fs from "node:fs";
 import {steamLogin, steamLogout} from "./utils/steam_controller";
 
 export const name = 'steam-workshop-downloader'
@@ -116,11 +117,32 @@ export async function apply(ctx: Context, config: Config) {
   ctx_ = ctx
 
   init_server(ctx)
+
+const resolveSteamcmdPath = () => {
+  // 优先使用本插件 lib 目录下自带的 steamcmd（更不受 pnpm / workspace 影响）
+  const pluginLibDir = (typeof __dirname !== 'undefined') ? __dirname : ctx.baseDir
+  const candidates = [
+    path.resolve(pluginLibDir, 'steamcmd-linux', 'linux32', 'steamcmd'),
+    path.resolve(ctx.baseDir, 'node_modules', 'koishi-plugin-steam-workshop-downloader', 'lib', 'steamcmd-linux', 'linux32', 'steamcmd'),
+  ]
+  for (const p of candidates) {
+    try {
+      if (fs.existsSync(p)) return p
+    } catch {}
+  }
+  return candidates[0]
+}
   ctx.middleware(async (session, next) => {
-    await download_file_and_send(session, session.content, ctx, config)
+    try {
+      const handled = await download_file_and_send(session, session.content, ctx, config)
+      if (!handled) return next()
+    } catch (err: any) {
+      logger.error('自动下载处理中间件异常：' + String(err?.message ?? err))
+      return next()
+    }
   })
 
-  ctx.command('创意工坊搜索 <search_content> [page] [game_id]')
+ctx.command('创意工坊搜索 <search_content> [page] [game_id]')
     .action(async (_, search_content, page, game_id) => {
 
         logger.info("用户 " + _.session.userId + " 搜索了 " + search_content + " 页码：" + (page || '1') + " 游戏ID：" + (game_id || config.default_game_id))
@@ -209,7 +231,7 @@ export async function apply(ctx: Context, config: Config) {
       const steam_guard_code = await _.session.prompt(120 * Time.second)
       await _.session.send([h.quote(_.session.messageId), h.text(`正在登录steam，请稍候`)])
       try {
-        const steamcmdPath = path.resolve(ctx.baseDir, 'node_modules', 'koishi-plugin-steam-workshop-downloader', 'lib', 'steamcmd-linux', 'linux32', 'steamcmd')
+        const steamcmdPath = resolveSteamcmdPath()
         const result = await steamLogin(steamcmdPath, account_name, password, steam_guard_code, ctx)
         let text: string
         switch (result) {
@@ -238,7 +260,7 @@ export async function apply(ctx: Context, config: Config) {
 
   ctx.command('登出steam')
     .action(async (_) => {
-      const steamcmdPath = path.resolve(ctx.baseDir, 'node_modules', 'koishi-plugin-steam-workshop-downloader', 'lib', 'steamcmd-linux', 'linux32', 'steamcmd')
+      const steamcmdPath = resolveSteamcmdPath()
       await _.session.send("是否确认登出steam? (y/N)")
       const confirmation = await _.session.prompt(30 * Time.second)
       if (confirmation?.toLowerCase() !== 'y') {
@@ -268,15 +290,15 @@ export async function apply(ctx: Context, config: Config) {
       if (id === undefined || isNaN(Number(id)) || id === '') {
         return h.text('指令用法：创意工坊黑名单添加 [mod id]')
       }
-      await ctx.database.create('blackList', {
-        id: Number(id),
-      }).catch((err: Error) => {
-        if (err.message.startsWith("UNIQUE constraint failed:")) {
+      try {
+        await ctx.database.create('blackList', { id: Number(id) })
+      } catch (err: any) {
+        const msg = String(err?.message ?? err)
+        if (msg.startsWith('UNIQUE constraint failed:')) {
           return h.text('该mod已在黑名单中，无需重复添加')
-        } else {
-          return h.text('添加黑名单失败，发生错误：' + err.message)
         }
-      })
+        return h.text('添加黑名单失败，发生错误：' + msg)
+      }
       return h.text(`已将mod ${id} 添加到黑名单，后续下载将被阻止`)
     })
 }
@@ -284,7 +306,7 @@ export async function apply(ctx: Context, config: Config) {
 const search_workshop = async (
   query: string,
   steam_api_key: string,
-  gameId: number = ctx_.config.default_game_id,
+  gameId: number,
   page = 1,
   numPerPage = 5,
 ) => {
