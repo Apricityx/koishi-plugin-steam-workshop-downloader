@@ -160,7 +160,7 @@ export const init_server = (ctx: Context) => {
       }
     }
   })
-  
+
 
 // 2) 浏览子目录或文件：GET {MOUNT}/(.*)
   ctx.server.get(`${MOUNT}/(.*)`, async (koaCtx) => {
@@ -198,7 +198,6 @@ export const init_server = (ctx: Context) => {
     }
   })
 
-  
+
   }
 
-}

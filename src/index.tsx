@@ -38,6 +38,8 @@ export interface Config {
   enable_proxy: boolean
   proxy_address: string
   include_download_address: boolean
+  append_workshop_link_in_progress_message: boolean
+  force_anonymous_download: boolean
   enable_no_public: boolean
   file_directory: string
   steam_api_key: string
@@ -52,6 +54,8 @@ export const Config: Schema<Config> = Schema.intersect([
     debug: Schema.boolean().description('是否启动调试模式').default(false),
     steam_account_name: Schema.string().description('steam账号名称，请使用指令"登录steam"来登录steamcmd'),
     download_size_limit: Schema.number().default(1024).description("下载大小限制，单位MB"),
+    append_workshop_link_in_progress_message: Schema.boolean().description('在“正在下载”提示末尾附上创意工坊链接').default(false),
+    force_anonymous_download: Schema.boolean().description('是否强制使用匿名账号（anonymous）下载（开启后不会使用已登录账号，也不会提示登录失效）').default(false),
   }).description('基础配置'),
 
   Schema.object({

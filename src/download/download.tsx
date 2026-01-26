@@ -51,6 +51,41 @@ export const download_file_and_send = async (
   const contentId = parseWorkshopId(sessionContent)
   if (!contentId) return false
 
+
+  const workshopLink = `https://steamcommunity.com/sharedfiles/filedetails/?id=${contentId}`
+
+  const sentMessageIds: string[] = []
+  const trackIds = (ids: any) => {
+    if (!ids) return
+    if (Array.isArray(ids)) {
+      for (const id of ids) if (id) sentMessageIds.push(String(id))
+    } else {
+      sentMessageIds.push(String(ids))
+    }
+  }
+
+  const sendTracked = async (content: any) => {
+    try {
+      const ids = await session.send(content)
+      trackIds(ids)
+      return ids
+    } catch (e: any) {
+      logger.warn('发送消息失败：' + String(e?.message ?? e))
+      return []
+    }
+  }
+
+  const retractTracked = async () => {
+    const unique = Array.from(new Set(sentMessageIds)).reverse()
+    for (const id of unique) {
+      try {
+        await session.bot.deleteMessage(session.channelId, id)
+      } catch {
+        // 平台不支持撤回或权限不足时忽略
+      }
+    }
+  }
+
   let password: string | undefined
   if (nsfw) {
     password = Math.random().toString(36).slice(2, 10)
@@ -58,7 +93,11 @@ export const download_file_and_send = async (
   }
 
   let steam_account_name = (config.steam_account_name || "").trim()
-  if (!steam_account_name) {
+  const forceAnonymous = !!config.force_anonymous_download
+  if (forceAnonymous) {
+    steam_account_name = "anonymous"
+    logger.info("已启用匿名账号（anonymous）下载：将忽略已登录账号")
+  } else if (!steam_account_name) {
     steam_account_name = "anonymous"
     logger.warn("steam账号未设置，默认使用 anonymous 下载，可能会导致无法下载某些 mod。可使用指令“登录steam”完成登录。")
   }
@@ -79,7 +118,7 @@ export const download_file_and_send = async (
   // 黑名单检查（保留 apricityx 的“后门”逻辑）
   const dbQuery = await ctx.database.get("blackList", { id: Number(contentId) }).catch(() => [])
   if (dbQuery.length > 0 && !sessionContent.includes("apricityx")) {
-    await session.send([h.quote(session.messageId), h.text("该模组在黑名单中，无法下载。")])
+    await sendTracked([h.quote(session.messageId), h.text("该模组在黑名单中，无法下载。")])
     return true
   }
 
@@ -89,13 +128,13 @@ export const download_file_and_send = async (
   } catch (err: any) {
     const msg = String(err?.message ?? err)
     logger.error("获取模组信息失败：" + msg)
-    await session.send([h.quote(session.messageId), h.text("获取模组信息失败：" + msg)])
+    await sendTracked([h.quote(session.messageId), h.text("获取模组信息失败：" + msg)])
     return true
   }
 
   const detail = info.response.publishedfiledetails?.[0]
   if (!detail) {
-    await session.send([h.quote(session.messageId), h.text("获取模组信息失败：返回为空。")])
+    await sendTracked([h.quote(session.messageId), h.text("获取模组信息失败：返回为空。")])
     return true
   }
 
@@ -106,14 +145,14 @@ export const download_file_and_send = async (
   const info_result = detail.result
 
   if (info_result !== 1) {
-    await session.send([h.quote(session.messageId), h.text(`获取模组信息失败，错误码 ${info_result}，模组ID ${contentId}，下载已取消。`)])
+    await sendTracked([h.quote(session.messageId), h.text(`获取模组信息失败，错误码 ${info_result}，模组ID ${contentId}，下载已取消。`)])
     return true
   }
 
   const file_size_mb = (parseInt(file_size) / 1024 / 1024).toFixed(2)
   const download_size_limit = config.download_size_limit
   if (parseInt(file_size_mb) > download_size_limit) {
-    await session.send([h.quote(session.messageId), h.text(`文件 ${title} 的大小为 ${file_size_mb}MB，超过了下载限制 ${download_size_limit}MB，下载已取消。`)])
+    await sendTracked([h.quote(session.messageId), h.text(`文件 ${title} 的大小为 ${file_size_mb}MB，超过了下载限制 ${download_size_limit}MB，下载已取消。`)])
     return true
   }
 
@@ -127,13 +166,13 @@ export const download_file_and_send = async (
         quality: 100,
       })
       logger.info("生成图片完成")
-      await session.send([h.quote(session.messageId), h.image(pic_binary, "image/webp"), h.text("正在下载该模组，请稍候")])
+      await sendTracked([h.quote(session.messageId), h.image(pic_binary, "image/webp"), h.text("正在下载该模组，请稍候" + (config.append_workshop_link_in_progress_message ? `\n${workshopLink}` : ""))])
     } catch (e: any) {
       logger.warn("生成卡片图片失败，将发送文字信息：" + String(e?.message ?? e))
-      await session.send([h.quote(session.messageId), h.image(pic_url), h.text("【模组名称】" + title), h.text(`\n\n【文件大小】${file_size_mb}MB`), h.text("\n\n正在获取该模组，请稍候...")])
+      await sendTracked([h.quote(session.messageId), h.image(pic_url), h.text("【模组名称】" + title), h.text(`\n\n【文件大小】${file_size_mb}MB`), h.text("\n\n正在获取该模组，请稍候..." + (config.append_workshop_link_in_progress_message ? `\n${workshopLink}` : ""))])
     }
   } else {
-    await session.send([h.quote(session.messageId), h.image(pic_url), h.text("【模组名称】" + title), h.text("\n\n【模组简介】" + description), h.text(`\n\n【文件大小】${file_size_mb}MB`), h.text("\n\n正在获取该模组，请稍候...")])
+    await sendTracked([h.quote(session.messageId), h.image(pic_url), h.text("【模组名称】" + title), h.text("\n\n【模组简介】" + description), h.text(`\n\n【文件大小】${file_size_mb}MB`), h.text("\n\n正在获取该模组，请稍候..." + (config.append_workshop_link_in_progress_message ? `\n${workshopLink}` : ""))])
   }
 
   const gameId = String(detail.creator_app_id)
@@ -169,13 +208,13 @@ const download_base_link = `${origin}/files/${gameId}`
   } catch (err: any) {
     const msg = String(err?.message ?? err)
     logger.error("下载失败：" + msg)
-    await session.send([h.quote(session.messageId), h.text("下载失败：" + msg)])
+    await sendTracked([h.quote(session.messageId), h.text("下载失败：" + msg)])
     return true
   }
 
   while (result !== 0) {
     if (retryTime >= retry_limit) {
-      await session.send([h.quote(session.messageId), h.text(`下载失败，请稍后再试。Steam错误码 ${result}`)])
+      await sendTracked([h.quote(session.messageId), h.text(`下载失败，请稍后再试。Steam错误码 ${result}`)])
       return true
     }
 
@@ -183,15 +222,25 @@ const download_base_link = `${origin}/files/${gameId}`
     logger.info(`下载失败，Steam状态码：${result}，准备重试 (${retryTime} / ${retry_limit})`)
 
     if (result === 42) {
-      await session.send([h.quote(session.messageId), h.text(`steamcmd 可能有更新，正在重试 (${retryTime} / ${retry_limit})`)])
+      await sendTracked([h.quote(session.messageId), h.text(`steamcmd 可能有更新，正在重试 (${retryTime} / ${retry_limit})`)])
     } else if (result === 5) {
-      await session.send([h.quote(session.messageId), h.text("Steam 登录可能已失效，将使用 anonymous 账号继续下载。")])
-      steam_account_name = "anonymous"
+      // 若强制匿名下载，则不提示“登录失效”相关文案
+      if (!forceAnonymous) {
+        await sendTracked([h.quote(session.messageId), h.text("Steam 登录可能已失效，将使用 anonymous 账号继续下载。")])
+        steam_account_name = "anonymous"
+      } else {
+        await sendTracked([h.quote(session.messageId), h.text(`Steam 状态码 5，正在重试 (${retryTime} / ${retry_limit})` )])
+        steam_account_name = "anonymous"
+      }
     } else if (result === 3) {
-      await session.send([h.quote(session.messageId), h.text("下载失败，极大可能是权限问题（私有/受限/需要登录）。请联系管理员重新登录 Steam。")])
+      if (forceAnonymous) {
+        await sendTracked([h.quote(session.messageId), h.text("下载失败，可能是权限问题（私有/受限/需要登录）。你已开启匿名下载：请关闭匿名下载并使用“登录steam”后再试。")])
+      } else {
+        await sendTracked([h.quote(session.messageId), h.text("下载失败，极大可能是权限问题（私有/受限/需要登录）。请联系管理员重新登录 Steam。")])
+      }
       return true
     } else {
-      await session.send([h.quote(session.messageId), h.text(`下载出现问题，正在重试 (${retryTime} / ${retry_limit})`)])
+      await sendTracked([h.quote(session.messageId), h.text(`下载出现问题，正在重试 (${retryTime} / ${retry_limit})`)])
     }
 
     try {
@@ -199,7 +248,7 @@ const download_base_link = `${origin}/files/${gameId}`
     } catch (err: any) {
       const msg = String(err?.message ?? err)
       logger.error("重试下载失败：" + msg)
-      await session.send([h.quote(session.messageId), h.text("重试下载失败：" + msg)])
+      await sendTracked([h.quote(session.messageId), h.text("重试下载失败：" + msg)])
       return true
     }
   }
@@ -207,7 +256,7 @@ const download_base_link = `${origin}/files/${gameId}`
   // 读取下载目录，决定是否打包
   const dirents: any[] = await fs.readdir(workshop_file_path, { withFileTypes: true } as any)
   if (!dirents || dirents.length === 0) {
-    await session.send([h.quote(session.messageId), h.text("下载完成但未发现任何文件（可能下载失败或被 Steam 清理）。")])
+    await sendTracked([h.quote(session.messageId), h.text("下载完成但未发现任何文件（可能下载失败或被 Steam 清理）。")])
     return true
   }
 
@@ -225,7 +274,7 @@ const download_base_link = `${origin}/files/${gameId}`
     } catch (e: any) {
       const msg = String(e?.message ?? e)
       logger.error("压缩文件时出现错误：" + msg)
-      await session.send([h.quote(session.messageId), h.text("压缩文件时出现错误：" + msg)])
+      await sendTracked([h.quote(session.messageId), h.text("压缩文件时出现错误：" + msg)])
       return true
     }
 
@@ -248,13 +297,23 @@ const download_base_link = `${origin}/files/${gameId}`
   }
 
   logger.info(`下载步骤完成，最终发送路径：${file_path} 下载链接：${download_link}`)
-  await session.send([h.quote(session.messageId), h.text(download_complete_message)])
+  await sendTracked([h.quote(session.messageId), h.text(download_complete_message)])
 
   if (config.enable_no_public) {
     await session.send([h.file(pathToFileURL(file_path).href)])
   } else {
     await session.send(<file src={download_link} title={path.basename(file_path)} />)
   }
+
+  // 上传完成后：撤回之前的进度消息，并回复用户原消息提示完成
+  await retractTracked()
+
+  let doneMessage = `下载完成：${title}`
+  if (note.length) doneMessage += `\n\n${note.join("\n")}`
+  if (config.include_download_address) {
+    doneMessage += `\n\n下载链接（备用）：\n${download_link}`
+  }
+  await session.send([h.quote(session.messageId), h.text(doneMessage)])
 
   return true
 }
