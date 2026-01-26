@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process"
 import { proxy_address } from "../index"
 import { Context } from "koishi"
+import { getPluginLogger } from "./plugin_logger"
 import path from "node:path"
 import readline from "node:readline"
 
@@ -22,8 +23,9 @@ export const runFile = (
   timeoutMs: number,
   logger?: any,
 ): Promise<RunResult> => {
-  const logInfo = (line: string) => (logger?.info ? logger.info(line) : console.log(line))
-  const logErr = (line: string) => (logger?.error ? logger.error(line) : console.error(line))
+    const logInfo = (line: string) => logger?.info?.(line)
+  const logErr = (line: string) => logger?.error?.(line)
+
 
   return new Promise<RunResult>((resolve, reject) => {
     const child = spawn(file, args, {
@@ -80,8 +82,9 @@ export const steamDownload = async (
   contentId: string,
   steam_account_name: string,
   ctx: Context,
+  debug = false,
 ) => {
-  const logger = ctx.logger("steam-workshop-downloader:steamcmd")
+  const logger = getPluginLogger(ctx, debug, "steam-workshop-downloader:steamcmd")
   if (isDownloading) {
     throw new Error("已有下载任务在进行中，请稍后再试")
   }
@@ -117,8 +120,9 @@ export const steamLogin = async (
   steam_account_pass: string,
   steam_guard_code: string,
   ctx: Context,
+  debug = false,
 ) => {
-  const logger = ctx.logger("steam-workshop-downloader:steamcmd")
+  const logger = getPluginLogger(ctx, debug, "steam-workshop-downloader:steamcmd")
   const args = [
     "+@NoPromptForPassword", "1",
     "+@ShutdownOnFailedCommand", "1",
@@ -130,8 +134,8 @@ export const steamLogin = async (
   return result.code
 }
 
-export const steamLogout = async (steamCmdPath: string, ctx: Context) => {
-  const logger = ctx.logger("steam-workshop-downloader:steamcmd")
+export const steamLogout = async (steamCmdPath: string, ctx: Context, debug = false) => {
+  const logger = getPluginLogger(ctx, debug, "steam-workshop-downloader:steamcmd")
   const result = await runFile(steamCmdPath, ["+logout", "+quit"], 10_000, logger)
   return result.code
 }

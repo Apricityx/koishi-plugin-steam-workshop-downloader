@@ -22,6 +22,7 @@ export async function renderHtmlToImage(
   ctx: Context,
   html: string,
   opts: RenderOptions = {},
+  logger?: any,
 ): Promise<Buffer> {
   const {
     width = 640,
@@ -45,7 +46,7 @@ export async function renderHtmlToImage(
     // 如果请求 jpeg + 透明，提示并自动禁用透明
     const useTransparent = (format === 'png' || format === 'webp') ? transparent : false
     if (transparent && format === 'jpeg') {
-      console.warn('[renderHtmlToImage] JPEG 不支持透明背景，已自动忽略 transparent。')
+      logger?.warn?.('[renderHtmlToImage] JPEG 不支持透明背景，已自动忽略 transparent。')
     }
 
     await page.setContent(html, { waitUntil })
@@ -78,7 +79,7 @@ export async function renderHtmlToImage(
       ? `${sizeMB.toFixed(2)} MB`
       : `${sizeKB.toFixed(2)} KB`
 
-    console.log(`[renderHtmlToImage] format=${format}, quality=${quality}, dpr=${deviceScaleFactor}, size=${pretty} (${bytes} bytes)`)
+    logger?.debug?.(`[renderHtmlToImage] format=${format}, quality=${quality}, dpr=${deviceScaleFactor}, size=${pretty} (${bytes} bytes)`)
 
     // 回调通知体积
     if (typeof onSize === 'function') onSize(bytes)

@@ -27,6 +27,7 @@ export async function createZip(
   outputDir: string,
   result_file_name: string,
   password?: string,
+  logger?: any,
 ): Promise<string> {
   const absOutputDir = path.resolve(outputDir)
   await fs.promises.mkdir(absOutputDir, { recursive: true })
@@ -43,7 +44,7 @@ export async function createZip(
 
   const done = new Promise<void>((resolve, reject) => {
     output.on('close', resolve)
-    archive.on('warning', (err: any) => (err.code === 'ENOENT' ? console.warn(err) : reject(err)))
+    archive.on('warning', (err: any) => (err.code === 'ENOENT' ? logger?.warn?.(err) : reject(err)))
     archive.on('error', reject)
   })
 
@@ -52,7 +53,7 @@ export async function createZip(
     const stat = await fs.promises.stat(file)
     if (stat.isFile()) archive.file(file, { name: path.basename(file) })
     else if (stat.isDirectory()) archive.directory(file, path.basename(file))
-    else console.warn(`[createZip] Skip unsupported path: ${file}`)
+    else logger?.warn?.(`[createZip] Skip unsupported path: ${file}`)
   }
   await archive.finalize()
   await done

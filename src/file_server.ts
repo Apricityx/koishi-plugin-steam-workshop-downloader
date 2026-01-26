@@ -1,10 +1,12 @@
 import {Context} from "koishi";
+import { getPluginLogger } from "./utils/plugin_logger";
 import fs from 'node:fs'
 import path from 'node:path'
 
 
-export const init_server = (ctx: Context) => {
-  const logger = ctx.logger("file downloader")
+export const init_server = (ctx: Context, debug = false) => {
+  const logger = getPluginLogger(ctx, debug, "steam-workshop-downloader:file-server")
+  if (!(ctx as any).server) return
   const targetDir = path.join(ctx.baseDir, 'data', 'steam-workshop-downloader', "steamapps", "workshop", "content")
 
   const resolveSafe = (p: string): string | null => {
@@ -160,7 +162,7 @@ export const init_server = (ctx: Context) => {
       }
     }
   })
-
+  
 
 // 2) 浏览子目录或文件：GET {MOUNT}/(.*)
   ctx.server.get(`${MOUNT}/(.*)`, async (koaCtx) => {
@@ -197,7 +199,4 @@ export const init_server = (ctx: Context) => {
       }
     }
   })
-
-
-  }
-
+}

@@ -3,6 +3,7 @@ import { Config } from "../index";
 import { Context, h } from "koishi";
 import { createZip } from "../utils/zip";
 import { steamDownload } from "../utils/steam_controller";
+import { getPluginLogger } from "../utils/plugin_logger";
 import fsSync, { promises as fs } from "node:fs";
 import { pathToFileURL } from "node:url";
 import path from "node:path";
@@ -43,7 +44,7 @@ export const download_file_and_send = async (
   ctx: Context,
   config: Config,
 ): Promise<boolean> => {
-  const logger = ctx.logger("steam-workshop-downloader")
+  const logger = getPluginLogger(ctx, config.debug, "steam-workshop-downloader")
 
   const { cleaned, nsfw } = stripNsfwFlag(sessionContent)
   sessionContent = cleaned
@@ -118,7 +119,9 @@ export const download_file_and_send = async (
   // 黑名单检查（保留 apricityx 的“后门”逻辑）
   const dbQuery = await ctx.database.get("blackList", { id: Number(contentId) }).catch(() => [])
   if (dbQuery.length > 0 && !sessionContent.includes("apricityx")) {
-    await sendTracked([h.quote(session.messageId), h.text("该模组在黑名单中，无法下载。")])
+    await sendTracked([h.quote(session.messageId), h.text(`该模组在黑名单中，无法下载。
+建议使用创意工坊链接在第三方平台下载：
+${workshopLink}`)])
     return true
   }
 
@@ -164,7 +167,7 @@ export const download_file_and_send = async (
         width: 500,
         format: "jpeg",
         quality: 100,
-      })
+      }, logger)
       logger.info("生成图片完成")
       await sendTracked([h.quote(session.messageId), h.image(pic_binary, "image/webp"), h.text("正在下载该模组，请稍候" + (config.append_workshop_link_in_progress_message ? `\n${workshopLink}` : ""))])
     } catch (e: any) {
@@ -176,22 +179,25 @@ export const download_file_and_send = async (
   }
 
   const gameId = String(detail.creator_app_id)
-const downloadServer = config.download_server
-const downloadPort = config.download_port
+  const enableDownloadServer = !!config.enable_download_server && !!(ctx as any).server
+  const downloadServer = (config.download_server || '').trim()
+  const downloadPort = config.download_port
 
-// 兼容两种写法：
-// 1) download_server = "http://example.com" + download_port
-// 2) download_server = "http://example.com:5140"（此时忽略 download_port）
-let origin = `${downloadServer}`.replace(/\/$/, "")
-try {
-  const u = new URL(origin)
-  origin = u.port ? `${u.protocol}//${u.host}` : `${u.protocol}//${u.hostname}:${downloadPort}`
-} catch {
-  // 非标准 URL 时，退化为原先的拼接方式
-  if (!origin.includes(":")) origin = `${origin}:${downloadPort}`
-}
-
-const download_base_link = `${origin}/files/${gameId}`
+  // 兼容两种写法：
+  // 1) download_server = "http://example.com" + download_port
+  // 2) download_server = "http://example.com:5140"（此时忽略 download_port）
+  let origin = `${downloadServer}`.replace(/\/$/, "")
+  let download_base_link = ""
+  if (enableDownloadServer && origin) {
+    try {
+      const u = new URL(origin)
+      origin = u.port ? `${u.protocol}//${u.host}` : `${u.protocol}//${u.hostname}:${downloadPort}`
+    } catch {
+      // 非标准 URL 时，退化为原先的拼接方式
+      if (!origin.includes(":")) origin = `${origin}:${downloadPort}`
+    }
+    download_base_link = `${origin}/files/${gameId}`
+  }
 
   const workshop_file_path = path.resolve(ctx.baseDir, "data", "steam-workshop-downloader", "steamapps", "workshop", "content", gameId, contentId)
   if (!fsSync.existsSync(workshop_file_path)) {
@@ -204,7 +210,7 @@ const download_base_link = `${origin}/files/${gameId}`
   let retryTime = 0
   let result: number
   try {
-    result = await steamDownload(steamcmdPath, gameId, contentId, steam_account_name, ctx)
+    result = await steamDownload(steamcmdPath, gameId, contentId, steam_account_name, ctx, config.debug)
   } catch (err: any) {
     const msg = String(err?.message ?? err)
     logger.error("下载失败：" + msg)
@@ -244,7 +250,7 @@ const download_base_link = `${origin}/files/${gameId}`
     }
 
     try {
-      result = await steamDownload(steamcmdPath, gameId, contentId, steam_account_name, ctx)
+      result = await steamDownload(steamcmdPath, gameId, contentId, steam_account_name, ctx, config.debug)
     } catch (err: any) {
       const msg = String(err?.message ?? err)
       logger.error("重试下载失败：" + msg)
@@ -270,7 +276,7 @@ const download_base_link = `${origin}/files/${gameId}`
     const zipOutDir = path.resolve(ctx.baseDir, "data", "steam-workshop-downloader", "steamapps", "workshop", "content", gameId, "zip")
     try {
       // 直接打包整个 contentId 目录，更稳定（单目录 / 多文件 / 混合目录都适配）
-      file_path = await createZip([workshop_file_path], zipOutDir, title, password)
+      file_path = await createZip([workshop_file_path], zipOutDir, title, password, logger)
     } catch (e: any) {
       const msg = String(e?.message ?? e)
       logger.error("压缩文件时出现错误：" + msg)
@@ -288,18 +294,21 @@ const download_base_link = `${origin}/files/${gameId}`
   const gameRoot = path.resolve(ctx.baseDir, "data", "steam-workshop-downloader", "steamapps", "workshop", "content", gameId)
   let rel = path.relative(gameRoot, file_path).split(path.sep).join("/")
   if (!rel || rel.startsWith("..")) rel = path.basename(file_path)
-  const download_link = `${download_base_link}/${encodeURI(rel)}`
+  let download_link = ""
+  if (enableDownloadServer) {
+    download_link = `${download_base_link}/${encodeURI(rel)}`
+  }
 
   let download_complete_message = "下载完成，上传中"
   if (note.length) download_complete_message += "\n\n" + note.join("\n")
-  if (config.include_download_address) {
+  if (enableDownloadServer && config.include_download_address) {
     download_complete_message += `\n\n如果长时间未发送文件，请将此链接复制到浏览器中进行下载\n\n${download_link}`
   }
 
   logger.info(`下载步骤完成，最终发送路径：${file_path} 下载链接：${download_link}`)
   await sendTracked([h.quote(session.messageId), h.text(download_complete_message)])
 
-  if (config.enable_no_public) {
+  if (config.enable_no_public || !enableDownloadServer) {
     await session.send([h.file(pathToFileURL(file_path).href)])
   } else {
     await session.send(<file src={download_link} title={path.basename(file_path)} />)
@@ -308,12 +317,18 @@ const download_base_link = `${origin}/files/${gameId}`
   // 上传完成后：撤回之前的进度消息，并回复用户原消息提示完成
   await retractTracked()
 
-  let doneMessage = `下载完成：${title}`
-  if (note.length) doneMessage += `\n\n${note.join("\n")}`
-  if (config.include_download_address) {
-    doneMessage += `\n\n下载链接（备用）：\n${download_link}`
+  const doneSegs: any[] = [h.quote(session.messageId), h.text("下载完成 "), h.at(session.userId)]
+  let extra = ""
+  if (note.length) extra += `\n\n${note.join("\n")}`
+  if (enableDownloadServer && config.include_download_address) {
+    extra += `
+
+下载链接（备用）：
+${download_link}`
   }
-  await session.send([h.quote(session.messageId), h.text(doneMessage)])
+  if (extra) doneSegs.push(h.text(extra))
+  await session.send(doneSegs)
+
 
   return true
 }
