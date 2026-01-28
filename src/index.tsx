@@ -577,14 +577,13 @@ return
       }
 
       if (!options.force) {
-        const folderTip = folders.length ? `（根目录存在 ${folders.length} 个文件夹：不会删除文件夹，也不会进入文件夹）` : '（不会删除任何文件夹）'
         return [
           h.quote(session.messageId),
-          h.text(`将清空群 ${gid} 的群文件根目录：预计删除 ${candidates.length} 个文件。${folderTip}\n这是不可逆操作。\n\n如确认执行，请发送：清空群文件 ${gid} -f`),
+          h.text(`将清空群 ${gid} 的群文件根目录：预计删除 ${candidates.length} 个文件。\n这是不可逆操作。\n\n如确认执行，请发送：清空群文件 ${gid} -f`),
         ]
       }
 
-      await session.send([h.quote(session.messageId), h.text(`开始清空群 ${gid} 的群文件根目录……（文件 ${candidates.length} 个；不删除文件夹）`)])
+      await session.send([h.quote(session.messageId), h.text(`开始清空群 ${gid} 的群文件根目录，共计文件 ${candidates.length} 个……`)])
       logger.info(`[清空群文件] start group=${gid} rootFiles=${files.length} candidates=${candidates.length} folders=${folders.length}`)
 
       let deletedFiles = 0
