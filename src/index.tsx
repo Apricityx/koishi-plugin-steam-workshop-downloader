@@ -7,6 +7,7 @@ import zipEncrypted from 'archiver-zip-encrypted'  // 新增：加密插件
 import {renderCardListPage} from "./search/renderCardListPage";
 import {renderHtmlToImage} from "./search/renderHtmlToImage";
 import {download_file_and_send} from "./download/download";
+import { NSFW_FLAG, stripNsfwFlag } from "./utils/nsfw";
 import {Time} from 'koishi'
 import path from "node:path";
 import fs from "node:fs";
@@ -121,6 +122,15 @@ export const inject = {
   optional: ['server', 'puppeteer'], // 如果要使用搜索功能则需要puppeteer
 }
 
+// 活动的“创意工坊搜索”交互：用于在同一用户在同一频道再次发起搜索时，静默取消上一轮
+// （撤回卡片/提示消息，不额外发送“已取消/已结束”之类的提示）
+type ActiveSearchState = {
+  token: string
+  cancelled: boolean
+  retract: () => Promise<void>
+}
+const activeSearchByUserChannel = new Map<string, ActiveSearchState>()
+
 // ================= 主逻辑 =================
 // 如果要使用代理，必须在Proxy-Agent和配置中都设置
 export let proxy_address = ''
@@ -171,6 +181,15 @@ const resolveSteamcmdPath = () => {
 ctx.command('创意工坊搜索 <search_content> [page] [game_id]')
     .action(async (_, search_content, page, game_id) => {
 
+        // 同一用户在同一频道发起新的搜索时，静默取消上一轮（不额外发送提示）
+        const searchKey = `${_.session.platform}:${_.session.userId}:${_.session.channelId}`
+        const prev = activeSearchByUserChannel.get(searchKey)
+        if (prev && !prev.cancelled) {
+          prev.cancelled = true
+          try { await prev.retract() } catch {}
+          activeSearchByUserChannel.delete(searchKey)
+        }
+
         logger.info("用户 " + _.session.userId + " 搜索了 " + search_content + " 页码：" + (page || '1') + " 游戏ID：" + (game_id || config.default_game_id))
 
         if (!ctx_.puppeteer) return "未安装puppeteer，无法使用搜索功能"
@@ -180,12 +199,23 @@ ctx.command('创意工坊搜索 <search_content> [page] [game_id]')
         if (game_id === undefined) {
           game_id = String(config.default_game_id)
         }
+        // 创建本次搜索交互状态（用于静默取消）
+        const token = `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`
+        const state: ActiveSearchState = { token, cancelled: false, retract: async () => {} }
+        activeSearchByUserChannel.set(searchKey, state)
+
+        const isCurrent = () => {
+          const cur = activeSearchByUserChannel.get(searchKey)
+          return !!cur && cur.token === token && !cur.cancelled
+        }
+
         const data = await search_workshop(search_content, config.steam_api_key, parseInt(game_id), parseInt(page), 5)
         let rendered_html: string
         try {
           rendered_html = renderCardListPage(data?.publishedfiledetails || [])
         } catch (e) {
           logger.warn('puppeteer渲染HTML失败', e)
+          if (isCurrent()) activeSearchByUserChannel.delete(searchKey)
           return "渲染图片失败，服务器网络可能无法访问steam网络，请稍候再试"
         }
 const binary_cards = await renderHtmlToImage(ctx, rendered_html, { height: 100 }, logger)
@@ -211,7 +241,13 @@ const retractSearchMsgs = async () => {
   }
 }
 
-let download_prompt = '\n30s内发送模组编号可以直接下载模组\n若模组已下载但长时间没有发送，请在编号后带-nsfw参数，例如"1 -nsfw"\n[0] 不执行下载操作'
+// 注册撤回函数，供“连续搜索静默取消”使用
+state.retract = retractSearchMsgs
+
+let download_prompt = `
+30s内发送序号可直接下载
+若长时间未发送，可在序号/链接后加 ${NSFW_FLAG}（加密压缩并生成密码），如：1 ${NSFW_FLAG}
+[0] 取消`
 let index = 0
 for (const item of data.publishedfiledetails || []) {
   index++
@@ -225,23 +261,71 @@ const ids = await _.session.send([
 ])
 trackIds(ids)
 
-let id = await _.session.prompt(90 * Time.second)
+// 使用 prompt(callback) 版本：可以拿到“下一条输入”的 session，避免被旧 prompt 吞掉新指令
+// - 如果输入是新的“创意工坊搜索 …”或直接发创意工坊链接：本轮静默结束，并放行该消息进入后续中间件/指令处理
+// - 如果输入是其它非序号内容：本轮静默结束，并放行该消息
+let forwarded = false
+let id = await _.session.prompt(async (s) => {
+  const input = String(s.content ?? '').trim()
+  if (!input) return ''
+
+  // 兼容常见指令前缀（/ . ! # 等）
+  const isSearchCmd = /^(?:[\/.!！#]\s*)?创意工坊搜索\b/.test(input)
+  const isWorkshopLink = /https?:\/\/steamcommunity\.com\/(?:sharedfiles|workshop)\/filedetails\/?\?id=\d+/i.test(input)
+
+  // 新搜索/直接链接：取消本轮并放行，让 Koishi 正常处理该输入（不要在这里 execute，避免引用错位）
+  if (isSearchCmd || isWorkshopLink) {
+    forwarded = true
+    try { await retractSearchMsgs() } catch {}
+    // 标记取消并移除状态：避免后续触发 timeout 提示
+    try { state.cancelled = true } catch {}
+    try { activeSearchByUserChannel.delete(searchKey) } catch {}
+    return
+  }
+
+  // 允许处理的输入：序号 / 取消 / 下一页（这些由本轮消费）
+  const t = input
+  if (t === '下一页' || t === '0') return t
+
+  // 支持 "1 -nsfw" 这种输入：先剥离 flag 再判断是否为数字
+  const parsed = stripNsfwFlag(t)
+  if (/^\d+$/.test(parsed.cleaned)) return t
+
+  // 其它内容：静默结束并放行（不再输出“输入其他内容…”）
+  forwarded = true
+  try { await retractSearchMsgs() } catch {}
+  // 标记取消并移除状态：避免后续触发 timeout 提示
+  try { state.cancelled = true } catch {}
+  try { activeSearchByUserChannel.delete(searchKey) } catch {}
+  return
+}, { timeout: 90 * Time.second })
+
+// 若本轮已被新搜索静默取消（或已放行），则直接退出
+if (!isCurrent()) return
+
+// timeout：没收到输入
 if (!id) {
   await retractSearchMsgs()
-  await _.session.send([h.quote(_.session.messageId), h.text("输入超时，已结束搜索交互 "), h.at(_.session.userId)])
+  if (isCurrent()) {
+    activeSearchByUserChannel.delete(searchKey)
+    await _.session.send([h.quote(_.session.messageId), h.text("输入超时，已结束搜索交互 "), h.at(_.session.userId)])
+  }
   return
 }
 
-let nsfw = false
-if (id.includes('-nsfw')) {
-  nsfw = true
-  id = id.replace('-nsfw', '')
-  id = id.trim()
-}
+// 如果本轮在 prompt 回调里决定“放行输入”（例如用户发新指令/普通聊天），这里直接退出
+if (forwarded) return
+
+const trimmedInput = String(id).trim()
+
+const nsfwParsed = stripNsfwFlag(trimmedInput)
+let nsfw = nsfwParsed.nsfw
+id = nsfwParsed.cleaned
 
 // 如果用户输入下一页则翻页
 if (id === '下一页') {
   await retractSearchMsgs()
+  if (isCurrent()) activeSearchByUserChannel.delete(searchKey)
   await _.session.execute(`创意工坊搜索 ${search_content} ${parseInt(page) + 1} ${game_id}`)
   return
 }
@@ -251,30 +335,27 @@ const id_num = parseInt(id)
 if (isNaN(id_num) || id_num < 0 || id_num > (data.publishedfiledetails?.length || 0)) {
   await retractSearchMsgs()
 
-  // 如果用户输入不为数字则尝试作为命令执行
-  const text = id
-  await (async () => {
-    try {
-      const result = await _.session.execute(text)
-      return result !== undefined
-    } catch {
-      return false
-    }
-  })()
+  // 如果本轮已被取消，则静默退出
+  if (!isCurrent()) return
 
-  await _.session.send([h.quote(_.session.messageId), h.text("输入其他内容，已结束搜索交互 "), h.at(_.session.userId)])
+  // 输入非序号/非下一页/非取消：结束本轮交互并静默退出（不执行该内容，也不发送提示）
+  activeSearchByUserChannel.delete(searchKey)
   return
 }
 
 if (id_num === 0) {
   await retractSearchMsgs()
-  await _.session.send([h.quote(_.session.messageId), h.text("已取消下载 "), h.at(_.session.userId)])
+  if (isCurrent()) {
+    activeSearchByUserChannel.delete(searchKey)
+    await _.session.send([h.quote(_.session.messageId), h.text("已取消下载 "), h.at(_.session.userId)])
+  }
   return
 }
 
 await retractSearchMsgs()
-logger.debug('https://steamcommunity.com/sharedfiles/filedetails/?id=' + data.publishedfiledetails![id_num - 1].publishedfileid + (nsfw ? ' nsfw' : ''))
-await download_file_and_send(_.session, 'https://steamcommunity.com/sharedfiles/filedetails/?id=' + data.publishedfiledetails![id_num - 1].publishedfileid + (nsfw ? ' nsfw' : ''), ctx, config)
+if (isCurrent()) activeSearchByUserChannel.delete(searchKey)
+logger.debug('https://steamcommunity.com/sharedfiles/filedetails/?id=' + data.publishedfiledetails![id_num - 1].publishedfileid + (nsfw ? ` ${NSFW_FLAG}` : ''))
+await download_file_and_send(_.session, 'https://steamcommunity.com/sharedfiles/filedetails/?id=' + data.publishedfiledetails![id_num - 1].publishedfileid + (nsfw ? ` ${NSFW_FLAG}` : ''), ctx, config)
 return
       }
     )
@@ -375,7 +456,6 @@ return
     /**
    * 清空群文件（仅删除群根目录的文件，不删除任何文件夹）
    * - 默认需要 -f 才会执行（危险操作）
-   * - 不会删除「发送指令后」新上传/修改的文件（通过 modify_time 判断）
    */
   ctx.command('清空群文件 [group_id]', '清空指定群的群文件根目录（仅支持 OneBot）', { authority: 4 })
     .option('force', '-f 直接执行（不再二次确认）')
@@ -389,9 +469,6 @@ return
       const gid = String(group_id || session.guildId || '')
       if (!gid) return '请在群聊中使用此指令，或手动指定 group_id。'
       const gidParam: any = /^\d+$/.test(gid) ? Number(gid) : gid
-
-      // 以“指令消息时间”为界：不删除发送指令之后的新文件
-      const startTs = Math.floor(((session as any).timestamp ?? Date.now()) / 1000)
 
       const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms))
       const LIST_FILE_COUNT = 9999
@@ -500,14 +577,15 @@ return
       }
 
       if (!options.force) {
+        const folderTip = folders.length ? `（根目录存在 ${folders.length} 个文件夹：不会删除文件夹，也不会进入文件夹）` : '（不会删除任何文件夹）'
         return [
           h.quote(session.messageId),
-          h.text(`将清空群 ${gid} 的群文件根目录：预计删除 ${candidates.length} 个文件 \n这是不可逆操作。\n\n如确认执行，请发送：清空群文件 ${gid} -f`),
+          h.text(`将清空群 ${gid} 的群文件根目录：预计删除 ${candidates.length} 个文件。${folderTip}\n这是不可逆操作。\n\n如确认执行，请发送：清空群文件 ${gid} -f`),
         ]
       }
 
-      await session.send([h.quote(session.messageId), h.text(`开始清空群文件，预计清理文件 ${candidates.length} 个，不删除文件夹`)])
-      logger.info(`[清空群文件] start group=${gid} rootFiles=${files.length} candidates=${candidates.length} folders=${folders.length} startTs=${startTs}`)
+      await session.send([h.quote(session.messageId), h.text(`开始清空群 ${gid} 的群文件根目录……（文件 ${candidates.length} 个；不删除文件夹）`)])
+      logger.info(`[清空群文件] start group=${gid} rootFiles=${files.length} candidates=${candidates.length} folders=${folders.length}`)
 
       let deletedFiles = 0
       let failed = 0

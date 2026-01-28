@@ -9,6 +9,7 @@ import { pathToFileURL } from "node:url";
 import path from "node:path";
 import { renderHtmlToImage } from "../search/renderHtmlToImage";
 import { renderSingleCardPage } from "../search/renderSingleCard";
+import { NSFW_FLAG, stripNsfwFlag } from "../utils/nsfw";
 
 function resolveSteamcmdPath(ctx: Context) {
   // 优先使用本插件 lib 目录下自带的 steamcmd（更不受 pnpm / workspace 影响）
@@ -30,13 +31,6 @@ function parseWorkshopId(text: string): string | null {
   return match?.[1] ?? null
 }
 
-function stripNsfwFlag(text: string): { cleaned: string, nsfw: boolean } {
-  const re = /(?:^|\s)-?nsfw(?:\s|$)/ig
-  const nsfw = re.test(text)
-  if (!nsfw) return { cleaned: text.trim(), nsfw: false }
-  const cleaned = text.replace(re, " ").replace(/\s+/g, " ").trim()
-  return { cleaned, nsfw: true }
-}
 
 export const download_file_and_send = async (
   session,
@@ -101,11 +95,21 @@ const sendFinal = async (status: string, t?: string, extraText?: string) => {
 }
 
 
+const isSpawnEacces = (err: any) => {
+  const code = err?.code
+  if (code === 'EACCES') return true
+  const msg = String(err?.message ?? err ?? '')
+  return /\bEACCES\b/.test(msg) && /\bspawn\b/i.test(msg)
+}
+
+const steamcmdPermissionHint = (steamcmdPath: string) =>
+  `\n\nSteamCMD 没有可执行权限：${steamcmdPath}\n请在服务器上执行：chmod +x ${steamcmdPath}`
+
 
   let password: string | undefined
   if (nsfw) {
     password = Math.random().toString(36).slice(2, 10)
-    logger.info("触发 -nsfw，设置压缩包密码为 " + password)
+    logger.info(`触发 ${NSFW_FLAG}，设置压缩包密码为 ${password}`)
   }
 
   let steam_account_name = (config.steam_account_name || "").trim()
@@ -227,6 +231,10 @@ if (parseInt(file_size_mb) > download_size_limit) {
   try {
     result = await steamDownload(steamcmdPath, gameId, contentId, steam_account_name, ctx, config.debug)
 } catch (err: any) {
+  if (isSpawnEacces(err)) {
+    logger.error("下载失败：steamcmd 没有可执行权限")
+    return await sendFinal("下载失败", title, steamcmdPermissionHint(steamcmdPath))
+  }
   const msg = String(err?.message ?? err)
   logger.error("下载失败：" + msg)
   return await sendFinal("下载失败", title, `\n\n下载失败：${msg}`)
@@ -263,6 +271,10 @@ if (retryTime >= retry_limit) {
     try {
       result = await steamDownload(steamcmdPath, gameId, contentId, steam_account_name, ctx, config.debug)
 } catch (err: any) {
+  if (isSpawnEacces(err)) {
+    logger.error("重试下载失败：steamcmd 没有可执行权限")
+    return await sendFinal("下载失败", title, steamcmdPermissionHint(steamcmdPath))
+  }
   const msg = String(err?.message ?? err)
   logger.error("重试下载失败：" + msg)
   return await sendFinal("下载失败", title, `\n\n重试下载失败：${msg}`)
