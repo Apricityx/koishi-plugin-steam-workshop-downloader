@@ -42,6 +42,8 @@ export interface Config {
   include_download_address: boolean
   append_workshop_link_in_progress_message: boolean
   force_anonymous_download: boolean
+  // 清空群文件：是否同时删除文件夹（关闭则保留文件夹结构）
+  delete_group_folders: boolean
   enable_no_public: boolean
   file_directory: string
   steam_api_key: string
@@ -59,6 +61,10 @@ export const Config: Schema<Config> = Schema.intersect([
     append_workshop_link_in_progress_message: Schema.boolean().description('在“正在下载”提示末尾附上创意工坊链接').default(false),
     force_anonymous_download: Schema.boolean().description('是否强制使用匿名账号（anonymous）下载（开启后不会使用已登录账号，也不会提示登录失效）').default(false),
   }).description('基础配置'),
+
+  Schema.object({
+    delete_group_folders: Schema.boolean().description('清空群文件时是否同时删除文件夹（关闭则保留文件夹结构）').default(true),
+  }).description('群文件清理设置'),
 
   Schema.object({
     enable_download_server: Schema.boolean().description('是否启用下载服务器（HTTP 文件服务）').default(true),
@@ -185,55 +191,94 @@ ctx.command('创意工坊搜索 <search_content> [page] [game_id]')
           logger.warn('puppeteer渲染HTML失败', e)
           return "渲染图片失败，服务器网络可能无法访问steam网络，请稍候再试"
         }
-        const binary_cards = await renderHtmlToImage(ctx, rendered_html, {height: 100}, logger)
-        let download_prompt = '\n30s内发送模组编号可以直接下载模组\n若模组已下载但长时间没有发送，请在编号后带-nsfw参数，例如"1 -nsfw"\n[0] 不执行下载操作'
-        let index = 0
-        for (const item of data.publishedfiledetails || []) {
-          index++
-          download_prompt += `\n[${index}] ${item.title}`
-        }
-        await _.session.send([h.quote(_.session.messageId), h.image(binary_cards, 'image/webp'), h.text(`【页码 （${parseInt(page) || 1} / ${Math.ceil(data.total / 5)}） 发送"下一页"来翻页】\n可以使用创意工坊搜索 [搜索内容] [页码] 来查看其他页面${download_prompt}`)])
-        let id = await _.session.prompt(90 * Time.second)
-        if (!id) {
-          await _.session.send([h.quote(_.session.messageId), h.text("输入超时，已结束搜索交互")])
-          return
-        }
-        let nsfw = false
-        if (id.includes('-nsfw')) {
-          nsfw = true
-          id = id.replace('-nsfw', '')
-          id = id.trim()
-        }
+const binary_cards = await renderHtmlToImage(ctx, rendered_html, { height: 100 }, logger)
 
-        // 如果用户输入下一页则翻页
-        if (id === '下一页') {
-          await _.session.execute(`创意工坊搜索 ${search_content} ${parseInt(page) + 1} ${game_id}`)
-          return
-        }
+// 记录并可撤回本次搜索提示消息，避免超时/取消后刷屏
+const searchMsgIds: string[] = []
+const trackIds = (ids: any) => {
+  if (!ids) return
+  if (Array.isArray(ids)) {
+    for (const id of ids) if (id) searchMsgIds.push(String(id))
+  } else {
+    searchMsgIds.push(String(ids))
+  }
+}
+const retractSearchMsgs = async () => {
+  const unique = Array.from(new Set(searchMsgIds)).reverse()
+  for (const id of unique) {
+    try {
+      await _.session.bot.deleteMessage(_.session.channelId, id)
+    } catch {
+      // ignore
+    }
+  }
+}
 
-        // 如果id在0-5之间则下载对应的mod
-        const id_num = parseInt(id)
-        if (isNaN(id_num) || id_num < 0 || id_num > (data.publishedfiledetails?.length || 0)) {
-          // 如果用户输入不为数字则尝试作为命令执行
-          const text = id;
-          await (async () => {
-            try {
-              // session.execute 会按当前会话解析并尝试执行命令
-              // 若确实匹配到命令，它会把执行结果返回（string/segment/void 皆有可能）
-              const result = await _.session.execute(text)
-              return result !== undefined
-            } catch {
-              // 不是有效命令或执行失败，就当没匹配到
-              return false
-            }
-          })()
-          return [h.quote(_.session.messageId), h.text("输入其他内容，已结束搜索交互")]
-          // return [h.quote(_.session.messageId), h.text("输入有误，已取消下载")]
-        }
-        if (id_num === 0) return [h.quote(_.session.messageId), h.text("已取消下载")]
-        logger.debug('https://steamcommunity.com/sharedfiles/filedetails/?id=' + data.publishedfiledetails![id_num - 1].publishedfileid + (nsfw ? ' nsfw' : ''))
-        await download_file_and_send(_.session, 'https://steamcommunity.com/sharedfiles/filedetails/?id=' + data.publishedfiledetails![id_num - 1].publishedfileid + (nsfw ? ' nsfw' : ''), ctx, config)
-        return
+let download_prompt = '\n30s内发送模组编号可以直接下载模组\n若模组已下载但长时间没有发送，请在编号后带-nsfw参数，例如"1 -nsfw"\n[0] 不执行下载操作'
+let index = 0
+for (const item of data.publishedfiledetails || []) {
+  index++
+  download_prompt += `\n[${index}] ${item.title}`
+}
+
+const ids = await _.session.send([
+  h.quote(_.session.messageId),
+  h.image(binary_cards, 'image/webp'),
+  h.text(`【页码 （${parseInt(page) || 1} / ${Math.ceil(data.total / 5)}） 发送"下一页"来翻页】\n可以使用创意工坊搜索 [搜索内容] [页码] 来查看其他页面${download_prompt}`),
+])
+trackIds(ids)
+
+let id = await _.session.prompt(90 * Time.second)
+if (!id) {
+  await retractSearchMsgs()
+  await _.session.send([h.quote(_.session.messageId), h.text("输入超时，已结束搜索交互 "), h.at(_.session.userId)])
+  return
+}
+
+let nsfw = false
+if (id.includes('-nsfw')) {
+  nsfw = true
+  id = id.replace('-nsfw', '')
+  id = id.trim()
+}
+
+// 如果用户输入下一页则翻页
+if (id === '下一页') {
+  await retractSearchMsgs()
+  await _.session.execute(`创意工坊搜索 ${search_content} ${parseInt(page) + 1} ${game_id}`)
+  return
+}
+
+// 如果id在0-5之间则下载对应的mod
+const id_num = parseInt(id)
+if (isNaN(id_num) || id_num < 0 || id_num > (data.publishedfiledetails?.length || 0)) {
+  await retractSearchMsgs()
+
+  // 如果用户输入不为数字则尝试作为命令执行
+  const text = id
+  await (async () => {
+    try {
+      const result = await _.session.execute(text)
+      return result !== undefined
+    } catch {
+      return false
+    }
+  })()
+
+  await _.session.send([h.quote(_.session.messageId), h.text("输入其他内容，已结束搜索交互 "), h.at(_.session.userId)])
+  return
+}
+
+if (id_num === 0) {
+  await retractSearchMsgs()
+  await _.session.send([h.quote(_.session.messageId), h.text("已取消下载 "), h.at(_.session.userId)])
+  return
+}
+
+await retractSearchMsgs()
+logger.debug('https://steamcommunity.com/sharedfiles/filedetails/?id=' + data.publishedfiledetails![id_num - 1].publishedfileid + (nsfw ? ' nsfw' : ''))
+await download_file_and_send(_.session, 'https://steamcommunity.com/sharedfiles/filedetails/?id=' + data.publishedfiledetails![id_num - 1].publishedfileid + (nsfw ? ' nsfw' : ''), ctx, config)
+return
       }
     )
 
@@ -344,32 +389,51 @@ ctx.command('创意工坊搜索 <search_content> [page] [game_id]')
       if (!gid) return '请在群聊中使用此指令，或手动指定 group_id。'
       const gidParam: any = /^\d+$/.test(gid) ? Number(gid) : gid
 
-      const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms))
+      // 是否删除文件夹（关闭则只删除文件，保留文件夹结构）
+      const deleteFolders = config.delete_group_folders !== false
 
-      const listFolder = async (folderId?: string) => {
-        // 优先走 Koishi 的内部 API（camelCase），不存在时再尝试 snake_case / object style
-        if (folderId) {
-          if (typeof onebot.getGroupFilesByFolder === 'function') return await onebot.getGroupFilesByFolder(gidParam, folderId)
-          // 一些实现（/get_group_files_by_folder）可能是 snake_case + 位置参数
-          if (typeof onebot.get_group_files_by_folder === 'function') {
-            try {
-              return await onebot.get_group_files_by_folder(gidParam, folderId)
-            } catch {
-              return await onebot.get_group_files_by_folder({ group_id: gidParam, folder_id: folderId })
-            }
-          }
-          throw new Error('OneBot 实现不支持 get_group_files_by_folder')
-        }
-        if (typeof onebot.getGroupRootFiles === 'function') return await onebot.getGroupRootFiles(gidParam)
-        if (typeof onebot.get_group_root_files === 'function') {
-          try {
-            return await onebot.get_group_root_files(gidParam)
-          } catch {
-            return await onebot.get_group_root_files({ group_id: gidParam })
-          }
-        }
-        throw new Error('OneBot 实现不支持 get_group_root_files')
-      }
+      const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms))
+      const LIST_FILE_COUNT = 9999 // NapCat 默认 50，这里拉高以避免只清 50 个
+
+
+const listFolder = async (folderId?: string) => {
+  // NapCat / go-cqhttp 的群文件列表接口通常有 file_count（默认 50），这里尽量拉高以获取完整列表
+  if (folderId) {
+    // camelCase
+    if (typeof onebot.getGroupFilesByFolder === 'function') {
+      try { return await onebot.getGroupFilesByFolder({ group_id: gidParam, folder_id: folderId, file_count: LIST_FILE_COUNT } as any) } catch {}
+      try { return await onebot.getGroupFilesByFolder(gidParam, folderId, LIST_FILE_COUNT) } catch {}
+      try { return await onebot.getGroupFilesByFolder(gidParam, folderId) } catch {}
+    }
+
+    // snake_case
+    if (typeof onebot.get_group_files_by_folder === 'function') {
+      try { return await onebot.get_group_files_by_folder({ group_id: gidParam, folder_id: folderId, file_count: LIST_FILE_COUNT } as any) } catch {}
+      try { return await onebot.get_group_files_by_folder(gidParam, folderId, LIST_FILE_COUNT) } catch {}
+      try { return await onebot.get_group_files_by_folder(gidParam, folderId) } catch {}
+      try { return await onebot.get_group_files_by_folder({ group_id: gidParam, folder_id: folderId } as any) } catch {}
+    }
+
+    throw new Error('OneBot 实现不支持 get_group_files_by_folder')
+  }
+
+  // root
+  if (typeof onebot.getGroupRootFiles === 'function') {
+    try { return await onebot.getGroupRootFiles({ group_id: gidParam, file_count: LIST_FILE_COUNT } as any) } catch {}
+    try { return await onebot.getGroupRootFiles(gidParam, LIST_FILE_COUNT) } catch {}
+    return await onebot.getGroupRootFiles(gidParam)
+  }
+
+  if (typeof onebot.get_group_root_files === 'function') {
+    try { return await onebot.get_group_root_files({ group_id: gidParam, file_count: LIST_FILE_COUNT } as any) } catch {}
+    try { return await onebot.get_group_root_files(gidParam, LIST_FILE_COUNT) } catch {}
+    try { return await onebot.get_group_root_files(gidParam) } catch {}
+    return await onebot.get_group_root_files({ group_id: gidParam } as any)
+  }
+
+  throw new Error('OneBot 实现不支持 get_group_root_files')
+}
+
 
       const unwrapFile = (x: any) => x?.file_info ?? x?.fileInfo ?? x?.file ?? x
       const unwrapFolder = (x: any) => x?.folder_info ?? x?.folderInfo ?? x?.folder ?? x
@@ -441,6 +505,21 @@ ctx.command('创意工坊搜索 <search_content> [page] [game_id]')
       const countRecursive = async (folderId?: string): Promise<{ files: number, folders: number }> => {
         const resp = await listFolder(folderId)
         const { files, folders } = normalize(resp)
+if (config.debug && !folderId) {
+  const names = files
+    .map((x: any) => {
+      const m = getFileMeta(x)
+      return m.name || m.fileId
+    })
+    .filter(Boolean)
+  const shown = names.slice(0, 200)
+  logger.debug(`[清空群文件] list root files=${files.length} folders=${folders.length}`)
+  if (shown.length) {
+    logger.debug('[清空群文件] root file names (<=200):\n' + shown.join('\n'))
+    if (names.length > shown.length) logger.debug(`[清空群文件] root file names truncated total=${names.length}`)
+  }
+}
+
         let totalFiles = files.length
         let totalFolders = folders.length
         for (const f of folders) {
@@ -462,13 +541,16 @@ ctx.command('创意工坊搜索 <search_content> [page] [game_id]')
       }
 
       if (!options.force) {
+        const folderTip = deleteFolders
+          ? `预计删除 ${totals.folders} 个文件夹。`
+          : `将保留 ${totals.folders} 个文件夹（不删除文件夹）。`
         return [
           h.quote(session.messageId),
-          h.text(`将清空群 ${gid} 的群文件：预计删除 ${totals.files} 个文件、${totals.folders} 个文件夹。\n这是不可逆操作。\n\n如确认执行，请发送：清空群文件 ${gid} -f`),
+          h.text(`将清空群 ${gid} 的群文件：预计删除 ${totals.files} 个文件。${folderTip}\n这是不可逆操作。\n\n如确认执行，请发送：清空群文件 ${gid} -f`),
         ]
       }
 
-      await session.send([h.quote(session.messageId), h.text(`开始清空群 ${gid} 的群文件……（文件 ${totals.files} / 文件夹 ${totals.folders}）`)])
+      await session.send([h.quote(session.messageId), h.text(`开始清空群 ${gid} 的群文件……（文件 ${totals.files} / 文件夹 ${totals.folders}${deleteFolders ? ' 将删除' : ' 将保留'}）`)])
       logger.info(`[清空群文件] start group=${gid} files=${totals.files} folders=${totals.folders}`)
 
       let deletedFiles = 0
@@ -594,6 +676,12 @@ ctx.command('创意工坊搜索 <search_content> [page] [game_id]')
           if (subId) await deleteFolderRecursive(subId, name)
         }
 
+        // 仅在开启“删除文件夹”时才删除文件夹本身，否则保留目录结构。
+        if (!deleteFolders) {
+          logger.debug(`[清空群文件] keep folder (skip delete) name=${folderName || '-'} id=${folderId}`)
+          return
+        }
+
         logger.debug(`[清空群文件] delete folder name=${folderName || '-'} id=${folderId}`)
         try {
           const internal = (session.bot as any)?.internal
@@ -655,6 +743,9 @@ ctx.command('创意工坊搜索 <search_content> [page] [game_id]')
 
       const summary: string[] = []
       summary.push(`清空完成：已删除文件 ${deletedFiles} 个、文件夹 ${deletedFolders} 个。`)
+      if (!deleteFolders) {
+        summary.push('未删除文件夹')
+      }
       if (failed) {
         summary.push(`失败 ${failed} 次。`)
         summary.push('提示：可在插件配置中临时开启 debug 以查看控制台详细日志。')

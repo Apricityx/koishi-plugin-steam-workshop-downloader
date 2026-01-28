@@ -87,6 +87,21 @@ export const download_file_and_send = async (
     }
   }
 
+const modLabel = (t?: string) => {
+  const v = (t || '').trim()
+  return `【${v || contentId}】`
+}
+
+const sendFinal = async (status: string, t?: string, extraText?: string) => {
+  await retractTracked()
+  const segs: any[] = [h.quote(session.messageId), h.text(`${modLabel(t)}${status} `), h.at(session.userId)]
+  if (extraText) segs.push(h.text(extraText))
+  await session.send(segs)
+  return true
+}
+
+
+
   let password: string | undefined
   if (nsfw) {
     password = Math.random().toString(36).slice(2, 10)
@@ -116,30 +131,32 @@ export const download_file_and_send = async (
     )
   }
 
-  // 黑名单检查（保留 apricityx 的“后门”逻辑）
-  const dbQuery = await ctx.database.get("blackList", { id: Number(contentId) }).catch(() => [])
-  if (dbQuery.length > 0 && !sessionContent.includes("apricityx")) {
-    await sendTracked([h.quote(session.messageId), h.text(`该模组在黑名单中，无法下载。
-建议使用创意工坊链接在第三方平台下载：
-${workshopLink}`)])
-    return true
-  }
+// 黑名单检查（保留 apricityx 的“后门”逻辑）
+const dbQuery = await ctx.database.get("blackList", { id: Number(contentId) }).catch(() => [])
+if (dbQuery.length > 0 && !sessionContent.includes("apricityx")) {
+  // 尽量获取标题用于最终提示（失败不影响）
+  let blTitle: string | undefined
+  try {
+    const tmp = await get_workshop_info(contentId)
+    blTitle = tmp?.response?.publishedfiledetails?.[0]?.title
+  } catch {}
+  const extra = `\n\n该模组在黑名单中，无法下载。\n建议使用创意工坊链接在第三方平台下载：\n${workshopLink}`
+  return await sendFinal("下载已取消", blTitle, extra)
+}
 
   let info: WorkshopFileResponse
   try {
     info = await get_workshop_info(contentId)
-  } catch (err: any) {
-    const msg = String(err?.message ?? err)
-    logger.error("获取模组信息失败：" + msg)
-    await sendTracked([h.quote(session.messageId), h.text("获取模组信息失败：" + msg)])
-    return true
-  }
+} catch (err: any) {
+  const msg = String(err?.message ?? err)
+  logger.error("获取模组信息失败：" + msg)
+  return await sendFinal("下载失败", undefined, `\n\n获取模组信息失败：${msg}`)
+}
 
   const detail = info.response.publishedfiledetails?.[0]
-  if (!detail) {
-    await sendTracked([h.quote(session.messageId), h.text("获取模组信息失败：返回为空。")])
-    return true
-  }
+if (!detail) {
+  return await sendFinal("下载失败", undefined, "\n\n获取模组信息失败：返回为空。")
+}
 
   const title = detail.title
   const description = detail.description
@@ -147,17 +164,15 @@ ${workshopLink}`)])
   const file_size = detail.file_size
   const info_result = detail.result
 
-  if (info_result !== 1) {
-    await sendTracked([h.quote(session.messageId), h.text(`获取模组信息失败，错误码 ${info_result}，模组ID ${contentId}，下载已取消。`)])
-    return true
-  }
+if (info_result !== 1) {
+  return await sendFinal("下载已取消", title, `\n\n获取模组信息失败，错误码 ${info_result}，模组ID ${contentId}。`)
+}
 
   const file_size_mb = (parseInt(file_size) / 1024 / 1024).toFixed(2)
   const download_size_limit = config.download_size_limit
-  if (parseInt(file_size_mb) > download_size_limit) {
-    await sendTracked([h.quote(session.messageId), h.text(`文件 ${title} 的大小为 ${file_size_mb}MB，超过了下载限制 ${download_size_limit}MB，下载已取消。`)])
-    return true
-  }
+if (parseInt(file_size_mb) > download_size_limit) {
+  return await sendFinal("下载已取消", title, `\n\n文件大小 ${file_size_mb}MB，超过了下载限制 ${download_size_limit}MB。`)
+}
 
   if (ctx.puppeteer) {
     try {
@@ -211,18 +226,16 @@ ${workshopLink}`)])
   let result: number
   try {
     result = await steamDownload(steamcmdPath, gameId, contentId, steam_account_name, ctx, config.debug)
-  } catch (err: any) {
-    const msg = String(err?.message ?? err)
-    logger.error("下载失败：" + msg)
-    await sendTracked([h.quote(session.messageId), h.text("下载失败：" + msg)])
-    return true
-  }
+} catch (err: any) {
+  const msg = String(err?.message ?? err)
+  logger.error("下载失败：" + msg)
+  return await sendFinal("下载失败", title, `\n\n下载失败：${msg}`)
+}
 
   while (result !== 0) {
-    if (retryTime >= retry_limit) {
-      await sendTracked([h.quote(session.messageId), h.text(`下载失败，请稍后再试。Steam错误码 ${result}`)])
-      return true
-    }
+if (retryTime >= retry_limit) {
+  return await sendFinal("下载失败", title, `\n\nSteam错误码 ${result}`)
+}
 
     retryTime += 1
     logger.info(`下载失败，Steam状态码：${result}，准备重试 (${retryTime} / ${retry_limit})`)
@@ -239,32 +252,28 @@ ${workshopLink}`)])
         steam_account_name = "anonymous"
       }
     } else if (result === 3) {
-      if (forceAnonymous) {
-        await sendTracked([h.quote(session.messageId), h.text("下载失败，可能是权限问题（私有/受限/需要登录）。你已开启匿名下载：请关闭匿名下载并使用“登录steam”后再试。")])
-      } else {
-        await sendTracked([h.quote(session.messageId), h.text("下载失败，极大可能是权限问题（私有/受限/需要登录）。请联系管理员重新登录 Steam。")])
-      }
-      return true
+      const tip = forceAnonymous
+        ? "下载失败，可能是权限问题（私有/受限/需要登录）。你已开启匿名下载：请关闭匿名下载并使用“登录steam”后再试。"
+        : "下载失败，极大可能是权限问题（私有/受限/需要登录）。请联系管理员重新登录 Steam。"
+      return await sendFinal("下载失败", title, `\n\n${tip}`)
     } else {
       await sendTracked([h.quote(session.messageId), h.text(`下载出现问题，正在重试 (${retryTime} / ${retry_limit})`)])
     }
 
     try {
       result = await steamDownload(steamcmdPath, gameId, contentId, steam_account_name, ctx, config.debug)
-    } catch (err: any) {
-      const msg = String(err?.message ?? err)
-      logger.error("重试下载失败：" + msg)
-      await sendTracked([h.quote(session.messageId), h.text("重试下载失败：" + msg)])
-      return true
-    }
+} catch (err: any) {
+  const msg = String(err?.message ?? err)
+  logger.error("重试下载失败：" + msg)
+  return await sendFinal("下载失败", title, `\n\n重试下载失败：${msg}`)
+}
   }
 
   // 读取下载目录，决定是否打包
   const dirents: any[] = await fs.readdir(workshop_file_path, { withFileTypes: true } as any)
-  if (!dirents || dirents.length === 0) {
-    await sendTracked([h.quote(session.messageId), h.text("下载完成但未发现任何文件（可能下载失败或被 Steam 清理）。")])
-    return true
-  }
+if (!dirents || dirents.length === 0) {
+  return await sendFinal("下载失败", title, "\n\n下载完成但未发现任何文件（可能下载失败或被 Steam 清理）。")
+}
 
   const hasDir = dirents.some((d: any) => d?.isDirectory?.())
   const shouldZip = hasDir || dirents.length !== 1 || !!password
@@ -277,12 +286,11 @@ ${workshopLink}`)])
     try {
       // 直接打包整个 contentId 目录，更稳定（单目录 / 多文件 / 混合目录都适配）
       file_path = await createZip([workshop_file_path], zipOutDir, title, password, logger)
-    } catch (e: any) {
-      const msg = String(e?.message ?? e)
-      logger.error("压缩文件时出现错误：" + msg)
-      await sendTracked([h.quote(session.messageId), h.text("压缩文件时出现错误：" + msg)])
-      return true
-    }
+} catch (e: any) {
+  const msg = String(e?.message ?? e)
+  logger.error("压缩文件时出现错误：" + msg)
+  return await sendFinal("下载失败", title, `\n\n压缩文件时出现错误：${msg}`)
+}
 
     note.push("已打包为 zip 文件发送")
     if (password) note.push(`解压密码：${password}`)
@@ -308,27 +316,29 @@ ${workshopLink}`)])
   logger.info(`下载步骤完成，最终发送路径：${file_path} 下载链接：${download_link}`)
   await sendTracked([h.quote(session.messageId), h.text(download_complete_message)])
 
+try {
   if (config.enable_no_public || !enableDownloadServer) {
     await session.send([h.file(pathToFileURL(file_path).href)])
   } else {
-    await session.send(<file src={download_link} title={path.basename(file_path)} />)
+    await session.send(h('file', { src: download_link, title: path.basename(file_path) }))
   }
+} catch (err: any) {
+  const msg = String(err?.message ?? err)
+  logger.error("上传文件失败：" + msg)
+  let extra = `\n\n上传失败：${msg}`
+  if (enableDownloadServer && config.include_download_address && download_link) {
+    extra += `\n\n下载链接（备用）：\n${download_link}`
+  }
+  return await sendFinal("上传失败", title, extra)
+}
 
   // 上传完成后：撤回之前的进度消息，并回复用户原消息提示完成
-  await retractTracked()
-
-  const doneSegs: any[] = [h.quote(session.messageId), h.text("下载完成 "), h.at(session.userId)]
   let extra = ""
   if (note.length) extra += `\n\n${note.join("\n")}`
-  if (enableDownloadServer && config.include_download_address) {
-    extra += `
-
-下载链接（备用）：
-${download_link}`
+  if (enableDownloadServer && config.include_download_address && download_link) {
+    extra += `\n\n下载链接（备用）：\n${download_link}`
   }
-  if (extra) doneSegs.push(h.text(extra))
-  await session.send(doneSegs)
-
+  await sendFinal("下载完成", title, extra)
 
   return true
 }
