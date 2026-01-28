@@ -44,6 +44,8 @@ export interface Config {
   force_anonymous_download: boolean
   // 清空群文件：是否同时删除文件夹（关闭则保留文件夹结构）
   delete_group_folders: boolean
+  // 清空群文件：最大删除轮数
+  delete_group_max_rounds: number
   enable_no_public: boolean
   file_directory: string
   steam_api_key: string
@@ -64,6 +66,7 @@ export const Config: Schema<Config> = Schema.intersect([
 
   Schema.object({
     delete_group_folders: Schema.boolean().description('清空群文件时是否同时删除文件夹（关闭则保留文件夹结构）').default(true),
+    delete_group_max_rounds: Schema.number().description('清空群文件的最大轮数').default(10),
   }).description('群文件清理设置'),
 
   Schema.object({
@@ -393,25 +396,38 @@ return
       const deleteFolders = config.delete_group_folders !== false
 
       const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms))
-      const LIST_FILE_COUNT = 9999 // NapCat 默认 50，这里拉高以避免只清 50 个
+      const PAGE_SIZE = 50 // go-cqhttp / NapCat 常见默认 50，分页时使用
+      const MAX_PAGES = 200 // 单次分页上限，避免死循环
+      const MAX_ROUNDS = Math.max(1, Number(config.delete_group_max_rounds ?? 10) || 10) // 多轮清理上限
+      const ROUND_SLEEP_MS = 1200
 
 
-const listFolder = async (folderId?: string) => {
-  // NapCat / go-cqhttp 的群文件列表接口通常有 file_count（默认 50），这里尽量拉高以获取完整列表
+const listFolderPage = async (folderId?: string, offset = 0) => {
+  // NapCat / go-cqhttp 的群文件列表接口通常支持 file_count + offset
+  const base = folderId
+    ? { group_id: gidParam, folder_id: folderId, file_count: PAGE_SIZE, offset }
+    : { group_id: gidParam, file_count: PAGE_SIZE, offset }
+  const baseNoOffset = folderId
+    ? { group_id: gidParam, folder_id: folderId, file_count: PAGE_SIZE }
+    : { group_id: gidParam, file_count: PAGE_SIZE }
+
   if (folderId) {
     // camelCase
     if (typeof onebot.getGroupFilesByFolder === 'function') {
-      try { return await onebot.getGroupFilesByFolder({ group_id: gidParam, folder_id: folderId, file_count: LIST_FILE_COUNT } as any) } catch {}
-      try { return await onebot.getGroupFilesByFolder(gidParam, folderId, LIST_FILE_COUNT) } catch {}
+      try { return await onebot.getGroupFilesByFolder(base as any) } catch {}
+      try { return await onebot.getGroupFilesByFolder(baseNoOffset as any) } catch {}
+      try { return await onebot.getGroupFilesByFolder(gidParam, folderId, PAGE_SIZE, offset) } catch {}
+      try { return await onebot.getGroupFilesByFolder(gidParam, folderId, PAGE_SIZE) } catch {}
       try { return await onebot.getGroupFilesByFolder(gidParam, folderId) } catch {}
     }
 
     // snake_case
     if (typeof onebot.get_group_files_by_folder === 'function') {
-      try { return await onebot.get_group_files_by_folder({ group_id: gidParam, folder_id: folderId, file_count: LIST_FILE_COUNT } as any) } catch {}
-      try { return await onebot.get_group_files_by_folder(gidParam, folderId, LIST_FILE_COUNT) } catch {}
+      try { return await onebot.get_group_files_by_folder(base as any) } catch {}
+      try { return await onebot.get_group_files_by_folder(baseNoOffset as any) } catch {}
+      try { return await onebot.get_group_files_by_folder(gidParam, folderId, PAGE_SIZE, offset) } catch {}
+      try { return await onebot.get_group_files_by_folder(gidParam, folderId, PAGE_SIZE) } catch {}
       try { return await onebot.get_group_files_by_folder(gidParam, folderId) } catch {}
-      try { return await onebot.get_group_files_by_folder({ group_id: gidParam, folder_id: folderId } as any) } catch {}
     }
 
     throw new Error('OneBot 实现不支持 get_group_files_by_folder')
@@ -419,14 +435,18 @@ const listFolder = async (folderId?: string) => {
 
   // root
   if (typeof onebot.getGroupRootFiles === 'function') {
-    try { return await onebot.getGroupRootFiles({ group_id: gidParam, file_count: LIST_FILE_COUNT } as any) } catch {}
-    try { return await onebot.getGroupRootFiles(gidParam, LIST_FILE_COUNT) } catch {}
+    try { return await onebot.getGroupRootFiles(base as any) } catch {}
+    try { return await onebot.getGroupRootFiles(baseNoOffset as any) } catch {}
+    try { return await onebot.getGroupRootFiles(gidParam, PAGE_SIZE, offset) } catch {}
+    try { return await onebot.getGroupRootFiles(gidParam, PAGE_SIZE) } catch {}
     return await onebot.getGroupRootFiles(gidParam)
   }
 
   if (typeof onebot.get_group_root_files === 'function') {
-    try { return await onebot.get_group_root_files({ group_id: gidParam, file_count: LIST_FILE_COUNT } as any) } catch {}
-    try { return await onebot.get_group_root_files(gidParam, LIST_FILE_COUNT) } catch {}
+    try { return await onebot.get_group_root_files(base as any) } catch {}
+    try { return await onebot.get_group_root_files(baseNoOffset as any) } catch {}
+    try { return await onebot.get_group_root_files(gidParam, PAGE_SIZE, offset) } catch {}
+    try { return await onebot.get_group_root_files(gidParam, PAGE_SIZE) } catch {}
     try { return await onebot.get_group_root_files(gidParam) } catch {}
     return await onebot.get_group_root_files({ group_id: gidParam } as any)
   }
@@ -502,9 +522,50 @@ const listFolder = async (folderId?: string) => {
         throw lastErr ?? new Error(`OneBot 实现不支持调用：${fnNames.join(' / ')}`)
       }
 
+      const listFolderAll = async (folderId?: string) => {
+        const allFiles: any[] = []
+        const allFolders: any[] = []
+        const seenFileIds = new Set<string>()
+        const seenFolderIds = new Set<string>()
+        let offset = 0
+        let page = 0
+
+        while (page < MAX_PAGES) {
+          const resp = await listFolderPage(folderId, offset)
+          const { files, folders } = normalize(resp)
+
+          let added = 0
+          for (const f of files) {
+            const { fileId } = getFileMeta(f)
+            if (!fileId || seenFileIds.has(fileId)) continue
+            seenFileIds.add(fileId)
+            allFiles.push(f)
+            added++
+          }
+          for (const f of folders) {
+            const { folderId: fid } = getFolderMeta(f)
+            if (!fid || seenFolderIds.has(fid)) continue
+            seenFolderIds.add(fid)
+            allFolders.push(f)
+            added++
+          }
+
+          if (files.length === 0 && folders.length === 0) break
+          if (added === 0) break
+          if (files.length < PAGE_SIZE && folders.length < PAGE_SIZE) break
+
+          page++
+          offset += PAGE_SIZE
+        }
+
+        if (config.debug) {
+          logger.debug(`[清空群文件] list all folderId=${folderId ?? 'root'} files=${allFiles.length} folders=${allFolders.length} pages=${page + 1}`)
+        }
+        return { files: allFiles, folders: allFolders }
+      }
+
       const countRecursive = async (folderId?: string): Promise<{ files: number, folders: number }> => {
-        const resp = await listFolder(folderId)
-        const { files, folders } = normalize(resp)
+        const { files, folders } = await listFolderAll(folderId)
 if (config.debug && !folderId) {
   const names = files
     .map((x: any) => {
@@ -546,11 +607,11 @@ if (config.debug && !folderId) {
           : `将保留 ${totals.folders} 个文件夹（不删除文件夹）。`
         return [
           h.quote(session.messageId),
-          h.text(`将清空群 ${gid} 的群文件：预计删除 ${totals.files} 个文件。${folderTip}\n这是不可逆操作。\n\n如确认执行，请发送：清空群文件 ${gid} -f`),
+          h.text(`将清空群 ${gid} 的群文件。${folderTip}\n这是不可逆操作。\n\n如确认执行，请发送：清空群文件 ${gid} -f`),
         ]
       }
 
-      await session.send([h.quote(session.messageId), h.text(`开始清空群 ${gid} 的群文件……（文件 ${totals.files} / 文件夹 ${totals.folders}${deleteFolders ? ' 将删除' : ' 将保留'}）`)])
+      await session.send([h.quote(session.messageId), h.text(`开始清空群 ${gid} 的群文件……（文件夹${deleteFolders ? '将删除' : '将保留'}）`)])
       logger.info(`[清空群文件] start group=${gid} files=${totals.files} folders=${totals.folders}`)
 
       let deletedFiles = 0
@@ -660,7 +721,7 @@ if (config.debug && !folderId) {
       const deleteFolderRecursive = async (folderId: string, folderName = '') => {
         let resp: any
         try {
-          resp = await listFolder(folderId)
+          resp = await listFolderAll(folderId)
         } catch (e: any) {
           failed++
           const reason = toErrText(e)
@@ -726,14 +787,23 @@ if (config.debug && !folderId) {
         await sleep(250)
       }
 
+      let rounds = 0
       try {
-        const root = await listFolder()
-        const { files, folders } = normalize(root)
+        while (rounds < MAX_ROUNDS) {
+          const root = await listFolderAll()
+          const { files, folders } = normalize(root)
+          if (files.length === 0 && folders.length === 0) break
 
-        for (const f of files) await deleteFile(f)
-        for (const folder of folders) {
-          const { folderId, name } = getFolderMeta(folder)
-          if (folderId) await deleteFolderRecursive(folderId, name)
+          rounds += 1
+          logger.info(`[清空群文件] round ${rounds}/${MAX_ROUNDS} rootFiles=${files.length} rootFolders=${folders.length}`)
+
+          for (const f of files) await deleteFile(f)
+          for (const folder of folders) {
+            const { folderId, name } = getFolderMeta(folder)
+            if (folderId) await deleteFolderRecursive(folderId, name)
+          }
+
+          if (rounds < MAX_ROUNDS) await sleep(ROUND_SLEEP_MS)
         }
       } catch (e: any) {
         const reason = toErrText(e)
@@ -741,19 +811,25 @@ if (config.debug && !folderId) {
         return [h.quote(session.messageId), h.text('清空过程中发生错误：' + reason)]
       }
 
+      let remainingFiles = 0
+      let remainingFolders = 0
+      try {
+        const remain = await listFolderAll()
+        const { files, folders } = normalize(remain)
+        remainingFiles = files.length
+        remainingFolders = folders.length
+      } catch {
+        // ignore remaining count errors
+      }
+
       const summary: string[] = []
-      summary.push(`清空完成：已删除文件 ${deletedFiles} 个、文件夹 ${deletedFolders} 个。`)
-      if (!deleteFolders) {
-        summary.push('未删除文件夹')
+      summary.push(`清空完成：轮次 ${rounds}/${MAX_ROUNDS}，删除文件 ${deletedFiles} 个、文件夹 ${deletedFolders} 个，失败 ${failed} 次。`)
+      if (!deleteFolders) summary.push('未删除文件夹。')
+      if (remainingFiles || remainingFolders) {
+        summary.push(`仍有残留：文件 ${remainingFiles} 个、文件夹 ${remainingFolders} 个（可能达到最大轮次）。`)
       }
-      if (failed) {
-        summary.push(`失败 ${failed} 次。`)
-        summary.push('提示：可在插件配置中临时开启 debug 以查看控制台详细日志。')
-        // 最多显示前 5 条，避免刷屏
-        const top = failDetails.filter(Boolean).slice(0, 5)
-        if (top.length) summary.push('\n失败原因（最多 5 条）：\n' + top.map((x) => `- ${x}`).join('\n'))
-      }
-      logger.info(`[清空群文件] done group=${gid} deletedFiles=${deletedFiles} deletedFolders=${deletedFolders} failed=${failed}`)
+      if (failed) summary.push('提示：开启 debug 可查看失败原因。')
+      logger.info(`[清空群文件] done group=${gid} rounds=${rounds}/${MAX_ROUNDS} deletedFiles=${deletedFiles} deletedFolders=${deletedFolders} failed=${failed} remainingFiles=${remainingFiles} remainingFolders=${remainingFolders}`)
 
       return [h.quote(session.messageId), h.text(summary.join('\n'))]
     })
